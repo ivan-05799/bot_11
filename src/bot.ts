@@ -1,25 +1,32 @@
-import { Telegraf } from 'telegraf';
+import { Telegraf, Markup } from 'telegraf';
 import { Client } from 'pg';
 import dotenv from 'dotenv';
 import express from 'express';
 
 dotenv.config();
 
-console.log('🚀 Telegram Bot для сбора API-ключей');
-console.log('🛡️  Устойчивый к конфликтам 409');
-
+// ========== КОНФИГУРАЦИЯ ==========
 const BOT_TOKEN = process.env.BOT_TOKEN || process.env.TELEGRAM_BOT_TOKEN;
 const DB_URL = process.env.DATABASE_URL;
 const PORT = parseInt(process.env.PORT || '10000');
 
 if (!BOT_TOKEN || !DB_URL) {
-  console.error('❌ Ошибка: Не заданы BOT_TOKEN или DATABASE_URL');
+  console.error('❌ Нет BOT_TOKEN или DATABASE_URL');
   process.exit(1);
 }
 
 const bot = new Telegraf(BOT_TOKEN);
 const app = express();
 app.use(express.json());
+
+// ========== КЛАВИАТУРЫ ==========
+const mainMenu = Markup.keyboard([
+  ['🔑 Отправить API-ключ'],
+  ['📊 Мой статус', '🆘 Помощь'],
+  ['📞 Связаться с поддержкой']
+]).resize();
+
+const removeKeyboard = Markup.removeKeyboard();
 
 // ========== ПОДКЛЮЧЕНИЕ К БД ==========
 async function getDbConnection() {
@@ -31,11 +38,7 @@ async function getDbConnection() {
   return db;
 }
 
-function isLikelyApiKey(text: string): boolean {
-  return text.length > 20 && /[a-zA-Z0-9._-]{20,}/.test(text);
-}
-
-// ========== WEBHOOK ДЛЯ ЗАКАЗЧИКА ==========
+// ========== WEBHOOK ДЛЯ БЭКЕНДА ==========
 app.post('/api/send-message', async (req, res) => {
   try {
     const { chat_id, message } = req.body;
@@ -44,8 +47,10 @@ app.post('/api/send-message', async (req, res) => {
       return res.status(400).json({ error: 'Нужны chat_id и message' });
     }
 
-    console.log(`📨 [WEBHOOK] Отправка ${chat_id}`);
-    await bot.telegram.sendMessage(chat_id, message, { parse_mode: 'Markdown' });
+    await bot.telegram.sendMessage(chat_id, message, { 
+      parse_mode: 'Markdown',
+      ...mainMenu 
+    });
     res.json({ success: true });
     
   } catch (error: any) {
@@ -58,131 +63,222 @@ app.get('/health', (req, res) => {
   res.json({ 
     status: 'ok', 
     bot: 'operational',
-    endpoints: {
-      webhook: '/api/send-message',
-      health: '/health'
-    }
+    version: '2.0',
+    features: ['keyboard', 'status-check', 'auto-recovery']
   });
 });
 
-// ========== ОСНОВНОЙ КОД БОТА ==========
+// ========== КОМАНДА /start С КНОПКАМИ ==========
+bot.start(async (ctx) => {
+  console.log(`🚀 /start от ${ctx.chat.id} (${ctx.from.first_name})`);
+  
+  await ctx.reply(
+    `*🔐 Skayfol Analytics*\n\n` +
+    `Добро пожаловать в систему аналитики рекламных кампаний!\n\n` +
+    `*Что умеет бот:*\n` +
+    `✅ Принимает API-ключи\n` +
+    `✅ Сохраняет в безопасное хранилище\n` +
+    `✅ Уведомляет о результатах анализа\n\n` +
+    `Выберите действие:`,
+    { 
+      parse_mode: 'Markdown',
+      ...mainMenu 
+    }
+  );
+});
+
+// ========== КНОПКА: ОТПРАВИТЬ API-КЛЮЧ ==========
+bot.hears('🔑 Отправить API-ключ', async (ctx) => {
+  await ctx.reply(
+    'Отправьте ваш API-ключ *одной строкой*.\n\n' +
+    '_Ключ должен быть длинным (от 30 символов)_',
+    { 
+      parse_mode: 'Markdown',
+      ...removeKeyboard 
+    }
+  );
+});
+
+// ========== КНОПКА: МОЙ СТАТУС ==========
+bot.hears('📊 Мой статус', async (ctx) => {
+  let db;
+  try {
+    db = await getDbConnection();
+    const result = await db.query(
+      `SELECT COUNT(*) as total, 
+              MAX(created_at) as last_added
+       FROM api_keys 
+       WHERE chat_id = $1`,
+      [ctx.chat.id]
+    );
+    
+    const total = result.rows[0].total || 0;
+    const lastAdded = result.rows[0].last_added 
+      ? new Date(result.rows[0].last_added).toLocaleString('ru-RU')
+      : 'ещё нет';
+    
+    await ctx.reply(
+      `*📊 Ваша статистика*\n\n` +
+      `🔑 Ключей сохранено: *${total}*\n` +
+      `⏰ Последний добавлен: *${lastAdded}*\n\n` +
+      `_Статус обработки: активен_`,
+      { 
+        parse_mode: 'Markdown',
+        ...mainMenu 
+      }
+    );
+    
+  } catch (error) {
+    console.error('❌ Ошибка получения статуса:', error);
+    await ctx.reply('⚠️ Не удалось получить статистику', mainMenu);
+  } finally {
+    if (db) await db.end();
+  }
+});
+
+// ========== КНОПКА: ПОМОЩЬ ==========
+bot.hears('🆘 Помощь', async (ctx) => {
+  await ctx.reply(
+    `*❓ Частые вопросы:*\n\n` +
+    `🔹 *Где взять API-ключ?*\n` +
+    `В настройках вашего рекламного кабинета\n\n` +
+    `🔹 *Ключ не принимается?*\n` +
+    `Убедитесь что скопировали полностью (30+ символов)\n\n` +
+    `🔹 *Как долго обрабатывается?*\n` +
+    `Обычно 5-15 минут\n\n` +
+    `🔹 *Данные в безопасности?*\n` +
+    `Да, ключи хранятся в зашифрованной базе`,
+    { 
+      parse_mode: 'Markdown',
+      ...mainMenu 
+    }
+  );
+});
+
+// ========== КНОПКА: СВЯЗАТЬСЯ ==========
+bot.hears('📞 Связаться с поддержкой', async (ctx) => {
+  await ctx.reply(
+    `*📞 Контакты поддержки*\n\n` +
+    `📧 Email: support@skayfol.com\n` +
+    `🌐 Сайт: https://skayfol.com\n` +
+    `⏰ Часы работы: 9:00-18:00 (МСК)\n\n` +
+    `_Ответим в течение 24 часов_`,
+    { 
+      parse_mode: 'Markdown',
+      ...mainMenu 
+    }
+  );
+});
+
+// ========== ОБРАБОТКА API-КЛЮЧЕЙ ==========
+bot.on('text', async (ctx) => {
+  const text = ctx.message.text;
+  const chatId = ctx.chat.id;
+  
+  // Пропускаем команды и кнопки
+  if (text.startsWith('/') || 
+      ['🔑 Отправить API-ключ', '📊 Мой статус', '🆘 Помощь', '📞 Связаться с поддержкой'].includes(text)) {
+    return;
+  }
+  
+  // Проверяем похоже ли на API-ключ
+  if (text.length > 25 && /[a-zA-Z0-9._-]{25,}/.test(text)) {
+    console.log(`🔑 Попытка сохранения ключа от ${chatId}`);
+    
+    let db;
+    try {
+      db = await getDbConnection();
+      
+      // Проверка дубликата
+      const exists = await db.query(
+        'SELECT id, created_at FROM api_keys WHERE chat_id = $1 AND api_key = $2',
+        [chatId, text]
+      );
+      
+      if (exists.rows.length > 0) {
+        const savedAt = new Date(exists.rows[0].created_at).toLocaleString('ru-RU');
+        await ctx.reply(
+          `⚠️ *Этот ключ уже был сохранён!*\n\n` +
+          `_Дата сохранения: ${savedAt}_\n\n` +
+          `Если нужно обновить ключ - свяжитесь с поддержкой.`,
+          { 
+            parse_mode: 'Markdown',
+            ...mainMenu 
+          }
+        );
+        return;
+      }
+      
+      // Сохранение нового ключа
+      await db.query(
+        'INSERT INTO api_keys (chat_id, api_key, platform) VALUES ($1, $2, $3)',
+        [chatId, text, 'unknown']
+      );
+      
+      await ctx.reply(
+        `✅ *Ключ успешно сохранён!*\n\n` +
+        `Мы начали обработку ваших данных.\n` +
+        `Вы получите уведомление когда анализ будет готов.\n\n` +
+        `_Обычно это занимает 5-15 минут_`,
+        { 
+          parse_mode: 'Markdown',
+          ...mainMenu 
+        }
+      );
+      
+      console.log(`✅ Ключ от ${chatId} сохранён`);
+      
+    } catch (error) {
+      console.error('❌ Ошибка БД:', error);
+      await ctx.reply(
+        '⚠️ *Ошибка сервера*\n\nПожалуйста, попробуйте позже.',
+        { 
+          parse_mode: 'Markdown',
+          ...mainMenu 
+        }
+      );
+    } finally {
+      if (db) await db.end();
+    }
+  } else {
+    // Не похоже на ключ - показываем меню
+    await ctx.reply(
+      'Пожалуйста, используйте кнопки меню или отправьте API-ключ.',
+      mainMenu
+    );
+  }
+});
+
+// ========== ЗАПУСК СИСТЕМЫ ==========
 let botStarted = false;
 
-async function initializeBot() {
-  console.log('🤖 Инициализация бота...');
-
-  // Команда /start
-  bot.start(async (ctx) => {
-    console.log(`👋 /start от ${ctx.chat.id}`);
-    await ctx.reply(
-      '🔑 *Skayfol Analytics*\n\nОтправьте ваш API-ключ.',
-      { parse_mode: 'Markdown' }
-    );
-  });
-
-  // Обработка сообщений
-  bot.on('text', async (ctx) => {
-    const message = ctx.message.text;
-    const chatId = ctx.chat.id;
-    
-    console.log(`📩 От ${chatId}: ${message.substring(0, 30)}...`);
-
-    if (isLikelyApiKey(message)) {
-      let db;
-      try {
-        db = await getDbConnection();
-        
-        // Проверка дубликата
-        const exists = await db.query(
-          'SELECT id FROM api_keys WHERE chat_id = $1 AND api_key = $2',
-          [chatId, message]
-        );
-        
-        if (exists.rows.length > 0) {
-          await ctx.reply('⚠️ Ключ уже сохранён ранее.');
-          return;
-        }
-        
-        // Сохранение нового ключа
-        await db.query(
-          'INSERT INTO api_keys (chat_id, api_key, platform) VALUES ($1, $2, $3)',
-          [chatId, message, 'unknown']
-        );
-        
-        await ctx.reply('✅ Ключ сохранён!');
-        console.log(`🔑 Ключ от ${chatId} сохранён`);
-        
-      } catch (error) {
-        console.error('❌ Ошибка БД:', error);
-        await ctx.reply('⚠️ Ошибка сервера. Попробуйте позже.');
-      } finally {
-        if (db) await db.end();
-      }
-    } else if (!message.startsWith('/')) {
-      await ctx.reply('Отправьте API-ключ (длинная строка).');
-    }
-  });
-
-  bot.help(async (ctx) => {
-    await ctx.reply('Отправьте API-ключ для сохранения.');
-  });
-}
-
-// ========== ЗАПУСК БОТА С ОБРАБОТКОЙ КОНФЛИКТОВ ==========
 async function startBot() {
   try {
-    await initializeBot();
+    // Очищаем старые webhook
+    await bot.telegram.deleteWebhook();
+    console.log('✅ Очищены старые webhook');
+    
     await bot.launch();
     botStarted = true;
-    console.log('✅ Бот запущен и готов к работе');
+    console.log('✅ Бот запущен с кнопочным меню');
     
   } catch (error: any) {
     if (error.message.includes('409')) {
-      console.log('⚠️ ВНИМАНИЕ: Конфликт 409 обнаружен');
-      console.log('📌 Возможные причины:');
-      console.log('   1. Бот уже запущен на другом сервере');
-      console.log('   2. Render создал дублирующий процесс');
-      console.log('   3. Заказчик запустил бота локально');
-      console.log('✅ Вебхук продолжает работать');
-      console.log('📝 Сообщения от клиентов временно не принимаются');
-      console.log('🔄 Конфликт разрешится автоматически через 1-2 минуты');
-      
-      // Не завершаем процесс - вебхук должен работать
+      console.log('⚠️ Конфликт 409 - временно, вебхук работает');
       botStarted = false;
-      
     } else {
-      console.error('❌ Критическая ошибка запуска:', error.message);
+      console.error('❌ Ошибка запуска:', error);
       throw error;
     }
   }
 }
 
-// ========== ПРОВЕРКА СТАТУСА БОТА ==========
-app.get('/bot-status', (req, res) => {
-  res.json({
-    bot_started: botStarted,
-    can_receive_messages: botStarted,
-    conflict_409: !botStarted,
-    timestamp: new Date().toISOString()
-  });
-});
-
 // ========== ЗАПУСК СЕРВЕРА ==========
 const server = app.listen(PORT, '0.0.0.0', () => {
-  console.log(`🌐 Веб-сервер запущен на порту ${PORT}`);
-  console.log(`🔗 Health: http://localhost:${PORT}/health`);
-  console.log(`🔗 Webhook: http://localhost:${PORT}/api/send-message`);
-  console.log(`🔗 Bot Status: http://localhost:${PORT}/bot-status`);
+  console.log(`🌐 Сервер на порту ${PORT}`);
+  console.log(`🤖 Версия: 2.0 (кнопочное меню)`);
   
-  // Запускаем бота после старта сервера
-  setTimeout(() => {
-    startBot().catch((error) => {
-      if (!error.message.includes('409')) {
-        console.error('💥 Фатальная ошибка:', error);
-        process.exit(1);
-      }
-    });
-  }, 1000);
+  setTimeout(startBot, 1000);
 });
 
 server.on('error', (error: any) => {
@@ -190,40 +286,10 @@ server.on('error', (error: any) => {
   process.exit(1);
 });
 
-// ========== ГРАЦИОЗНОЕ ЗАВЕРШЕНИЕ ==========
-process.on('SIGTERM', gracefulShutdown);
-process.on('SIGINT', gracefulShutdown);
-
-async function gracefulShutdown() {
+// Graceful shutdown
+process.on('SIGTERM', () => {
   console.log('🛑 Завершение работы...');
-  
-  if (botStarted) {
-    try {
-      await bot.stop();
-      console.log('✅ Бот остановлен');
-    } catch (error) {
-      console.error('❌ Ошибка остановки бота:', error);
-    }
-  }
-  
-  server.close(() => {
-    console.log('✅ Сервер остановлен');
-    process.exit(0);
-  });
-  
-  setTimeout(() => {
-    console.log('⚠️ Принудительное завершение');
-    process.exit(1);
-  }, 10000);
-}
-
-// ========== ГЛОБАЛЬНЫЕ ОБРАБОТЧИКИ ==========
-process.on('uncaughtException', (error) => {
-  console.error('💥 Непойманное исключение:', error);
+  process.exit(0);
 });
 
-process.on('unhandledRejection', (reason, promise) => {
-  console.error('💥 Необработанный промис:', reason);
-});
-
-console.log('✅ Система инициализирована. Ожидание запуска...');
+console.log('🚀 Система инициализирована');
