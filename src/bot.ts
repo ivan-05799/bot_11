@@ -5,6 +5,13 @@ import express from 'express';
 
 dotenv.config();
 
+// ========== ЗАЩИТА ОТ ДУБЛИРОВАНИЯ ==========
+const INSTANCE_ID = Math.random().toString(36).substring(2, 10);
+const PID = process.pid;
+
+console.log(`🔐 Запуск экземпляра #${INSTANCE_ID} (PID: ${PID})`);
+console.log(`🕐 Время сервера: ${new Date().toISOString()}`);
+
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const DB_URL = process.env.DATABASE_URL;
 const WEBHOOK_PORT = process.env.PORT || 3000;
@@ -21,7 +28,6 @@ app.use(express.json());
 async function getDbConnection() {
   const db = new Client({ 
     connectionString: DB_URL,
-    // Настройки для Neon
     connectionTimeoutMillis: 5000,
     idle_in_transaction_session_timeout: 10000
   });
@@ -42,24 +48,40 @@ app.post('/api/send-message', async (req, res) => {
       return res.status(400).json({ error: 'Не указаны chat_id или message' });
     }
 
-    console.log(`📨 Запрос на отправку пользователю ${chat_id}`);
+    console.log(`[${INSTANCE_ID}] 📨 Запрос на отправку пользователю ${chat_id}`);
     await bot.telegram.sendMessage(chat_id, message, { parse_mode: 'Markdown' });
     
-    console.log(`✅ Сообщение отправлено`);
+    console.log(`[${INSTANCE_ID}] ✅ Сообщение отправлено`);
     res.json({ success: true });
     
   } catch (error) {
-    console.error('❌ Ошибка отправки:', error);
+    console.error(`[${INSTANCE_ID}] ❌ Ошибка отправки:`, error);
     res.status(500).json({ error: 'Ошибка отправки сообщения' });
   }
 });
 
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', service: 'telegram-bot' });
+  res.json({ 
+    status: 'ok', 
+    service: 'telegram-bot',
+    instance: INSTANCE_ID,
+    pid: PID,
+    timestamp: new Date().toISOString()
+  });
 });
 
 async function startBot() {
-  console.log('🤖 Запуск бота...');
+  console.log(`[${INSTANCE_ID}] 🤖 Запуск бота...`);
+
+  // Проверяем что бот доступен
+  setTimeout(async () => {
+    try {
+      const botInfo = await bot.telegram.getMe();
+      console.log(`[${INSTANCE_ID}] ✅ Бот ${botInfo.username} запущен`);
+    } catch (error: any) {
+      console.error(`[${INSTANCE_ID}] ❌ Ошибка проверки бота:`, error.message);
+    }
+  }, 3000);
 
   // Команда /start
   bot.start(async (ctx) => {
@@ -74,7 +96,7 @@ async function startBot() {
         { parse_mode: 'Markdown' }
       );
     } catch (error) {
-      console.error('❌ Ошибка БД:', error);
+      console.error(`[${INSTANCE_ID}] ❌ Ошибка БД:`, error);
       await ctx.reply('⚠️ Временная ошибка сервиса. Попробуйте позже.');
     } finally {
       if (db) await db.end();
@@ -83,6 +105,8 @@ async function startBot() {
 
   // Обработка сообщений
   bot.on('text', async (ctx) => {
+    console.log(`[${INSTANCE_ID}] 📩 Сообщение от ${ctx.chat.id}: ${ctx.message.text.substring(0, 50)}...`);
+    
     const message = ctx.message.text;
     const chatId = ctx.chat.id;
 
@@ -104,10 +128,10 @@ async function startBot() {
           { parse_mode: 'Markdown' }
         );
 
-        console.log(`🔑 Новый API-ключ от пользователя ${chatId}`);
+        console.log(`[${INSTANCE_ID}] 🔑 Новый API-ключ от пользователя ${chatId}`);
 
       } catch (error) {
-        console.error('❌ Ошибка сохранения:', error);
+        console.error(`[${INSTANCE_ID}] ❌ Ошибка сохранения:`, error);
         await ctx.reply('⚠️ Ошибка при сохранении ключа. Попробуйте еще раз.');
       } finally {
         if (db) await db.end();
@@ -134,20 +158,20 @@ async function startBot() {
 
   // Запуск
   bot.launch();
-  console.log('🤖 Бот запущен и ждет API-ключи...');
+  console.log(`[${INSTANCE_ID}] 🤖 Бот запущен и ждет API-ключи...`);
 
   app.listen(WEBHOOK_PORT, () => {
-    console.log(`🌐 Webhook сервер на порту ${WEBHOOK_PORT}`);
+    console.log(`[${INSTANCE_ID}] 🌐 Webhook сервер на порту ${WEBHOOK_PORT}`);
   });
 }
 
 // Обработка ошибок
 process.on('unhandledRejection', (reason, promise) => {
-  console.log('❌ Unhandled Rejection at:', promise, 'reason:', reason);
+  console.log(`[${INSTANCE_ID}] ❌ Unhandled Rejection at:`, promise, 'reason:', reason);
 });
 
 process.on('uncaughtException', (error) => {
-  console.log('❌ Uncaught Exception:', error);
+  console.log(`[${INSTANCE_ID}] ❌ Uncaught Exception:`, error);
 });
 
 startBot().catch(console.error);
