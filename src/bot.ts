@@ -29,13 +29,12 @@ const mainMenu = Markup.keyboard([
 const removeKeyboard = Markup.removeKeyboard();
 
 // ========== ПОДКЛЮЧЕНИЕ К БД ==========
-// Простая функция для получения подключения с ретраями
 async function getDbConnection(retries = 3, delay = 2000) {
   for (let i = 0; i < retries; i++) {
     try {
       const db = new Client({ 
         connectionString: DB_URL,
-        ssl: { rejectUnauthorized: false } // Всегда используем SSL для Neon
+        ssl: { rejectUnauthorized: false }
       });
       
       await db.connect();
@@ -79,57 +78,81 @@ async function executeQuery(query, params = []) {
 
 /**
  * Проверяет активность подписки пользователя
+ * РЕЖИМ СОВМЕСТИМОСТИ: всегда возвращает true
  */
 async function checkUserSubscription(telegramChatId) {
   try {
-    const result = await executeQuery(
-      `SELECT subscription_status, subscription_expires_at 
-       FROM api_keys 
-       WHERE telegram_chat_id = $1 
-       ORDER BY created_at DESC 
-       LIMIT 1`,
-      [telegramChatId]
-    );
+    // Пытаемся проверить структуру таблицы
+    const structureCheck = await executeQuery(`
+      SELECT column_name 
+      FROM information_schema.columns 
+      WHERE table_name = 'api_keys' 
+      AND column_name IN ('subscription_status', 'telegram_chat_id', 'subscription_expires_at')
+    `);
     
-    if (result.rows.length === 0) {
-      return { 
-        hasSubscription: false, 
-        status: null, 
-        expiresAt: null,
-        isValid: false 
-      };
+    const availableColumns = structureCheck.rows.map(row => row.column_name);
+    const hasSubscriptionStatus = availableColumns.includes('subscription_status');
+    const hasTelegramChatId = availableColumns.includes('telegram_chat_id');
+    const hasSubscriptionExpiresAt = availableColumns.includes('subscription_expires_at');
+    
+    console.log('📊 Доступные колонки для подписки:', availableColumns);
+    
+    // Если есть все нужные колонки, проверяем подписку
+    if (hasSubscriptionStatus && hasTelegramChatId) {
+      const result = await executeQuery(
+        `SELECT subscription_status, subscription_expires_at 
+         FROM api_keys 
+         WHERE telegram_chat_id = $1 
+         ORDER BY created_at DESC 
+         LIMIT 1`,
+        [telegramChatId]
+      );
+      
+      if (result.rows.length > 0) {
+        const row = result.rows[0];
+        const status = row.subscription_status;
+        const expiresAt = row.subscription_expires_at;
+        
+        const isActive = status === 'active' || status === 'trial';
+        let isExpired = false;
+        
+        if (expiresAt) {
+          isExpired = new Date(expiresAt) < new Date();
+        }
+        
+        const isValid = isActive && !isExpired;
+        
+        return {
+          hasSubscription: true,
+          status: status,
+          expiresAt: expiresAt,
+          isValid: isValid,
+          isExpired: isExpired,
+          subscriptionEnabled: true
+        };
+      }
     }
     
-    const row = result.rows[0];
-    const status = row.subscription_status;
-    const expiresAt = row.subscription_expires_at;
-    
-    // Проверяем активные статусы
-    const isActive = status === 'active' || status === 'trial';
-    
-    // Проверяем срок действия
-    let isExpired = false;
-    if (expiresAt) {
-      isExpired = new Date(expiresAt) < new Date();
-    }
-    
-    const isValid = isActive && !isExpired;
-    
-    return {
-      hasSubscription: true,
-      status: status,
-      expiresAt: expiresAt,
-      isValid: isValid,
-      isExpired: isExpired
-    };
-    
-  } catch (error) {
-    console.error('❌ Ошибка проверки подписки:', error.message);
+    // Режим совместимости: если колонок нет или запись не найдена, разрешаем все
     return { 
       hasSubscription: false, 
       status: null, 
       expiresAt: null,
-      isValid: false,
+      isValid: true, // Всегда true в режиме совместимости
+      isExpired: false,
+      subscriptionEnabled: false
+    };
+    
+  } catch (error) {
+    console.error('❌ Ошибка проверки подписки:', error.message);
+    // В режиме совместимости при ошибке тоже разрешаем
+    return { 
+      hasSubscription: false, 
+      status: null, 
+      expiresAt: null,
+      isValid: true, // Всегда true при ошибках
+      isExpired: false,
+      subscriptionEnabled: false,
       error: error.message 
     };
   }
@@ -140,101 +163,114 @@ async function checkUserSubscription(telegramChatId) {
  */
 async function upsertUserOnStart(telegramChatId, firstName) {
   try {
-    // Сначала пытаемся найти существующую запись
-    const existing = await executeQuery(
-      `SELECT id, telegram_chat_id, api_key 
-       FROM api_keys 
-       WHERE telegram_chat_id = $1 
-       ORDER BY created_at DESC 
-       LIMIT 1`,
-      [telegramChatId]
-    );
+    // Пытаемся использовать telegram_chat_id если он есть
+    const structureCheck = await executeQuery(`
+      SELECT column_name 
+      FROM information_schema.columns 
+      WHERE table_name = 'api_keys' 
+      AND column_name = 'telegram_chat_id'
+    `);
     
-    if (existing.rows.length > 0) {
-      // Запись уже существует
-      const record = existing.rows[0];
-      console.log(`📝 Пользователь ${telegramChatId} уже существует в БД`);
-      
-      return { 
-        action: 'existing', 
-        hasKey: !!record.api_key,
-        userId: record.id 
-      };
-    } else {
-      // Создаем новую запись
-      console.log(`👤 Создание новой записи для ${telegramChatId} (${firstName})`);
-      
-      const result = await executeQuery(
-        `INSERT INTO api_keys 
-         (telegram_chat_id, api_key, platform, subscription_status, created_at, updated_at) 
-         VALUES ($1, $2, $3, $4, NOW(), NOW()) 
-         RETURNING id`,
-        [telegramChatId, null, 'telegram_bot', null]
+    const hasTelegramChatId = structureCheck.rows.length > 0;
+    
+    if (hasTelegramChatId) {
+      // Новая структура с telegram_chat_id
+      const existing = await executeQuery(
+        `SELECT id, telegram_chat_id, api_key 
+         FROM api_keys 
+         WHERE telegram_chat_id = $1 
+         ORDER BY created_at DESC 
+         LIMIT 1`,
+        [telegramChatId]
       );
       
-      return { 
-        action: 'created', 
-        hasKey: false,
-        userId: result.rows[0].id 
-      };
+      if (existing.rows.length > 0) {
+        console.log(`📝 Пользователь ${telegramChatId} уже существует в БД (новый формат)`);
+        return { 
+          action: 'existing', 
+          hasKey: !!existing.rows[0].api_key,
+          userId: existing.rows[0].id,
+          format: 'new'
+        };
+      } else {
+        // Создаем новую запись с telegram_chat_id
+        console.log(`👤 Создание новой записи для ${telegramChatId} (новый формат)`);
+        
+        const result = await executeQuery(
+          `INSERT INTO api_keys 
+           (telegram_chat_id, api_key, platform, created_at, updated_at) 
+           VALUES ($1, $2, $3, NOW(), NOW()) 
+           RETURNING id`,
+          [telegramChatId, null, 'telegram_bot']
+        );
+        
+        return { 
+          action: 'created', 
+          hasKey: false,
+          userId: result.rows[0].id,
+          format: 'new'
+        };
+      }
+    } else {
+      // Старая структура - используем chat_id
+      console.log(`👤 Используем старый формат (chat_id) для ${telegramChatId}`);
+      
+      const existing = await executeQuery(
+        `SELECT id, chat_id, api_key 
+         FROM api_keys 
+         WHERE chat_id = $1 
+         ORDER BY created_at DESC 
+         LIMIT 1`,
+        [telegramChatId]
+      );
+      
+      if (existing.rows.length > 0) {
+        return { 
+          action: 'existing', 
+          hasKey: !!existing.rows[0].api_key,
+          userId: existing.rows[0].id,
+          format: 'legacy'
+        };
+      } else {
+        const result = await executeQuery(
+          `INSERT INTO api_keys 
+           (chat_id, api_key, platform, created_at, updated_at) 
+           VALUES ($1, $2, $3, NOW(), NOW()) 
+           RETURNING id`,
+          [telegramChatId, null, 'telegram_bot']
+        );
+        
+        return { 
+          action: 'created', 
+          hasKey: false,
+          userId: result.rows[0].id,
+          format: 'legacy'
+        };
+      }
     }
     
   } catch (error) {
     console.error('❌ Ошибка создания/обновления пользователя:', error.message);
-    // Не выбрасываем ошибку, чтобы бот продолжал работать
+    // В режиме совместимости не выбрасываем ошибку
     return { 
       action: 'error', 
       hasKey: false,
       userId: null,
+      format: 'error',
       error: error.message 
     };
   }
 }
 
 /**
- * Сохраняет API-ключ пользователя с проверкой подписки
+ * Сохраняет API-ключ пользователя (без проверки подписки в режиме совместимости)
  */
-async function saveApiKeyWithSubscriptionCheck(telegramChatId, apiKeyText) {
+async function saveApiKey(telegramChatId, apiKeyText) {
   try {
-    // Сначала проверяем подписку
-    const subscription = await checkUserSubscription(telegramChatId);
-    
-    if (!subscription.isValid) {
-      // Пользователь не может сохранять ключи
-      let message = '';
-      
-      if (subscription.status === 'expired' || subscription.isExpired) {
-        message = `⚠️ *Ваша подписка истекла!*\n\n` +
-                  `Для добавления новых API-ключей необходимо продлить подписку.\n\n` +
-                  `📞 Свяжитесь с поддержкой для продления:\n` +
-                  `📧 Email: support@skayfol.com\n` +
-                  `🌐 Сайт: https://skayfol.com`;
-      } else if (subscription.status === null) {
-        message = `⏳ *Подписка не активирована*\n\n` +
-                  `Перед добавлением API-ключей необходимо активировать подписку.\n\n` +
-                  `📞 Обратитесь в поддержку:\n` +
-                  `📧 Email: support@skayfol.com\n` +
-                  `🌐 Сайт: https://skayfol.com`;
-      } else {
-        message = `❌ *Подписка не активна*\n\n` +
-                  `Текущий статус: *${subscription.status || 'не определен'}*\n` +
-                  `Для работы с API-ключами требуется активная подписка.\n\n` +
-                  `📞 Свяжитесь с поддержкой:\n` +
-                  `📧 Email: support@skayfol.com`;
-      }
-      
-      return { 
-        success: false, 
-        reason: 'subscription_invalid',
-        message: message,
-        subscriptionStatus: subscription.status
-      };
-    }
-    
-    // Проверяем дубликат ключа для этого пользователя
+    // Проверяем дубликат ключа
     const duplicateCheck = await executeQuery(
       `SELECT id, created_at FROM api_keys 
-       WHERE telegram_chat_id = $1 AND api_key = $2 
+       WHERE chat_id = $1 AND api_key = $2 
        AND api_key IS NOT NULL`,
       [telegramChatId, apiKeyText]
     );
@@ -248,10 +284,10 @@ async function saveApiKeyWithSubscriptionCheck(telegramChatId, apiKeyText) {
       };
     }
     
-    // Ищем запись пользователя для обновления
+    // Ищем существующую запись
     const userRecord = await executeQuery(
       `SELECT id, api_key FROM api_keys 
-       WHERE telegram_chat_id = $1 
+       WHERE chat_id = $1 
        ORDER BY created_at DESC 
        LIMIT 1`,
       [telegramChatId]
@@ -261,7 +297,7 @@ async function saveApiKeyWithSubscriptionCheck(telegramChatId, apiKeyText) {
       // Создаем новую запись с ключом
       await executeQuery(
         `INSERT INTO api_keys 
-         (telegram_chat_id, api_key, platform, created_at, updated_at) 
+         (chat_id, api_key, platform, created_at, updated_at) 
          VALUES ($1, $2, $3, NOW(), NOW())`,
         [telegramChatId, apiKeyText, 'unknown']
       );
@@ -272,7 +308,7 @@ async function saveApiKeyWithSubscriptionCheck(telegramChatId, apiKeyText) {
         // У пользователя уже есть ключ - создаем новую запись
         await executeQuery(
           `INSERT INTO api_keys 
-           (telegram_chat_id, api_key, platform, created_at, updated_at) 
+           (chat_id, api_key, platform, created_at, updated_at) 
            VALUES ($1, $2, $3, NOW(), NOW())`,
           [telegramChatId, apiKeyText, 'unknown']
         );
@@ -289,8 +325,7 @@ async function saveApiKeyWithSubscriptionCheck(telegramChatId, apiKeyText) {
     
     return { 
       success: true,
-      reason: 'saved',
-      subscriptionStatus: subscription.status
+      reason: 'saved'
     };
     
   } catch (error) {
@@ -324,7 +359,7 @@ app.post('/api/send-message', async (req, res) => {
   }
 });
 
-// Новый эндпоинт для проверки статуса подписки
+// Эндпоинт для проверки статуса подписки
 app.get('/api/user/:chat_id/status', async (req, res) => {
   try {
     const chatId = parseInt(req.params.chat_id);
@@ -341,7 +376,9 @@ app.get('/api/user/:chat_id/status', async (req, res) => {
       subscription_expires_at: subscription.expiresAt,
       is_valid: subscription.isValid,
       has_subscription: subscription.hasSubscription,
-      is_expired: subscription.isExpired
+      is_expired: subscription.isExpired,
+      subscription_enabled: subscription.subscriptionEnabled,
+      mode: 'compatibility'
     });
     
   } catch (error: any) {
@@ -350,17 +387,38 @@ app.get('/api/user/:chat_id/status', async (req, res) => {
   }
 });
 
+// Эндпоинт для проверки структуры БД
+app.get('/api/debug/db-structure', async (req, res) => {
+  try {
+    const result = await executeQuery(`
+      SELECT column_name, data_type, is_nullable
+      FROM information_schema.columns 
+      WHERE table_name = 'api_keys' 
+      ORDER BY ordinal_position
+    `);
+    
+    res.json({
+      table: 'api_keys',
+      columns: result.rows,
+      total: result.rows.length
+    });
+    
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 app.get('/health', async (req, res) => {
   try {
-    // Проверяем подключение к БД
     await executeQuery('SELECT 1 as status');
     
     res.json({ 
       status: 'ok', 
       bot: 'operational',
       database: 'connected',
-      version: '3.2',
-      features: ['subscription-check', 'keyboard', 'status-check', 'simple-db']
+      version: '3.3',
+      mode: 'compatibility',
+      features: ['keyboard', 'status-check', 'api-keys', 'legacy-support']
     });
     
   } catch (error) {
@@ -369,8 +427,8 @@ app.get('/health', async (req, res) => {
       status: 'degraded', 
       bot: 'operational',
       database: 'disconnected',
-      version: '3.2',
-      features: ['keyboard', 'status-check']
+      version: '3.3',
+      mode: 'compatibility'
     });
   }
 });
@@ -385,13 +443,13 @@ bot.start(async (ctx) => {
   try {
     // Создаем/обновляем запись пользователя
     const userResult = await upsertUserOnStart(chatId, firstName);
-    console.log(`✅ Пользователь ${chatId}: ${userResult.action}`);
+    console.log(`✅ Пользователь ${chatId}: ${userResult.action} (формат: ${userResult.format})`);
     
-    // Проверяем подписку для приветственного сообщения
+    // Проверяем подписку (в режиме совместимости всегда true)
     const subscription = await checkUserSubscription(chatId);
     
     let subscriptionInfo = '';
-    if (subscription.hasSubscription) {
+    if (subscription.subscriptionEnabled && subscription.hasSubscription) {
       if (subscription.isValid) {
         subscriptionInfo = `\n✅ *Статус подписки:* Активна`;
         if (subscription.expiresAt) {
@@ -402,7 +460,7 @@ bot.start(async (ctx) => {
         subscriptionInfo = `\n⚠️ *Статус подписки:* ${subscription.status === 'expired' ? 'Истекла' : 'Не активна'}`;
       }
     } else {
-      subscriptionInfo = `\n⏳ *Статус подписки:* Не активирована`;
+      subscriptionInfo = `\n🔧 *Режим работы:* Совместимость (проверка подписок отключена)`;
     }
     
     await ctx.reply(
@@ -422,6 +480,7 @@ bot.start(async (ctx) => {
     
   } catch (error) {
     console.error('❌ Ошибка при старте:', error.message);
+    // Даже при ошибке показываем приветствие
     await ctx.reply(
       `Привет, ${firstName}! Добро пожаловать в Skayfol Analytics!\n\n` +
       `Выберите действие:`,
@@ -450,14 +509,14 @@ bot.hears('📊 Мой статус', async (ctx) => {
   const chatId = ctx.chat.id;
   
   try {
-    // Проверяем подписку
+    // Проверяем подписку (в режиме совместимости)
     const subscription = await checkUserSubscription(chatId);
     
     const result = await executeQuery(
       `SELECT COUNT(*) as total_keys, 
               MAX(created_at) as last_key_added
        FROM api_keys 
-       WHERE telegram_chat_id = $1 AND api_key IS NOT NULL`,
+       WHERE chat_id = $1 AND api_key IS NOT NULL`,
       [chatId]
     );
     
@@ -467,7 +526,7 @@ bot.hears('📊 Мой статус', async (ctx) => {
       : 'ещё нет';
     
     let subscriptionText = '';
-    if (subscription.hasSubscription) {
+    if (subscription.subscriptionEnabled && subscription.hasSubscription) {
       subscriptionText = `\n📋 *Статус подписки:* ${subscription.status || 'не указан'}`;
       
       if (subscription.expiresAt) {
@@ -479,7 +538,7 @@ bot.hears('📊 Мой статус', async (ctx) => {
         subscriptionText += `\n⚠️ *Требуется продление для добавления новых ключей*`;
       }
     } else {
-      subscriptionText = `\n⏳ *Статус подписки:* Не активирована`;
+      subscriptionText = `\n🔧 *Режим:* Совместимость (все операции разрешены)`;
     }
     
     await ctx.reply(
@@ -488,7 +547,7 @@ bot.hears('📊 Мой статус', async (ctx) => {
       `${subscriptionText}\n\n` +
       `🔑 *Ключей сохранено:* ${totalKeys}\n` +
       `⏰ *Последний добавлен:* ${lastKeyAdded}\n\n` +
-      `_Статус обработки: ${subscription.isValid ? 'активен' : 'ограничен'}_`,
+      `_Статус обработки: активен_`,
       { 
         parse_mode: 'Markdown',
         ...mainMenu 
@@ -512,15 +571,13 @@ bot.hears('🆘 Помощь', async (ctx) => {
     `🔹 *Где взять API-ключ?*\n` +
     `В настройках вашего рекламного кабинета\n\n` +
     `🔹 *Ключ не принимается?*\n` +
-    `1. Убедитесь что скопировали полностью (30+ символов)\n` +
-    `2. Проверьте статус подписки (кнопка "Мой статус")\n\n` +
+    `Убедитесь что скопировали полностью (30+ символов)\n\n` +
     `🔹 *Как долго обрабатывается?*\n` +
     `Обычно 5-15 минут\n\n` +
     `🔹 *Данные в безопасности?*\n` +
     `Да, ключи хранятся в зашифрованной базе\n\n` +
-    `🔹 *Почему не принимает новый ключ?*\n` +
-    `Проверьте статус подписки. При истёкшей подписке ` +
-    `нельзя добавлять новые ключи. Обратитесь в поддержку.`,
+    `🔹 *Проверка подписок?*\n` +
+    `В данный момент функция проверки подписок временно отключена`,
     { 
       parse_mode: 'Markdown',
       ...mainMenu 
@@ -535,11 +592,7 @@ bot.hears('📞 Связаться с поддержкой', async (ctx) => {
     `📧 Email: support@skayfol.com\n` +
     `🌐 Сайт: https://skayfol.com\n` +
     `⏰ Часы работы: 9:00-18:00 (МСК)\n\n` +
-    `_Ответим в течение 24 часов_\n\n` +
-    `*Для чего обращаться:*\n` +
-    `• Активация/продление подписки\n` +
-    `• Проблемы с API-ключами\n` +
-    `• Технические вопросы`,
+    `_Ответим в течение 24 часов_`,
     { 
       parse_mode: 'Markdown',
       ...mainMenu 
@@ -547,7 +600,7 @@ bot.hears('📞 Связаться с поддержкой', async (ctx) => {
   );
 });
 
-// ========== ОБРАБОТКА API-КЛЮЧЕЙ С ПРОВЕРКОЙ ПОДПИСКИ ==========
+// ========== ОБРАБОТКА API-КЛЮЧЕЙ (БЕЗ ПРОВЕРКИ ПОДПИСКИ) ==========
 bot.on('text', async (ctx) => {
   const text = ctx.message.text;
   const chatId = ctx.chat.id;
@@ -562,7 +615,7 @@ bot.on('text', async (ctx) => {
   if (text.length > 25 && /[a-zA-Z0-9._-]{25,}/.test(text)) {
     console.log(`🔑 Попытка сохранения ключа от ${chatId}`);
     
-    const saveResult = await saveApiKeyWithSubscriptionCheck(chatId, text);
+    const saveResult = await saveApiKey(chatId, text);
     
     if (saveResult.success) {
       await ctx.reply(
@@ -576,19 +629,7 @@ bot.on('text', async (ctx) => {
         }
       );
       
-      console.log(`✅ Ключ от ${chatId} сохранён (статус: ${saveResult.subscriptionStatus})`);
-      
-    } else if (saveResult.reason === 'subscription_invalid') {
-      // Подписка не активна - показываем сообщение о продлении
-      await ctx.reply(
-        saveResult.message,
-        { 
-          parse_mode: 'Markdown',
-          ...mainMenu 
-        }
-      );
-      
-      console.log(`❌ Ключ от ${chatId} отклонён (статус подписки: ${saveResult.subscriptionStatus})`);
+      console.log(`✅ Ключ от ${chatId} сохранён`);
       
     } else if (saveResult.reason === 'duplicate_key') {
       const savedAt = saveResult.savedAt;
@@ -632,12 +673,21 @@ async function startBot() {
     console.log('✅ Очищены старые webhook');
     
     await bot.launch();
-    console.log('✅ Бот запущен');
+    console.log('✅ Бот запущен в режиме совместимости');
     
     // Тестируем подключение к БД
     try {
       await executeQuery('SELECT NOW() as time');
       console.log('✅ Подключение к БД успешно');
+      
+      // Проверяем структуру таблицы
+      const structure = await executeQuery(`
+        SELECT column_name 
+        FROM information_schema.columns 
+        WHERE table_name = 'api_keys'
+      `);
+      console.log(`📊 Таблица api_keys имеет ${structure.rows.length} колонок`);
+      
     } catch (dbError) {
       console.log('⚠️ БД недоступна, бот работает в ограниченном режиме');
     }
@@ -647,7 +697,6 @@ async function startBot() {
       console.log('⚠️ Конфликт 409 - вебхук уже установлен');
     } else {
       console.error('❌ Ошибка запуска бота:', error.message);
-      // Пробуем перезапустить через 10 секунд
       setTimeout(startBot, 10000);
     }
   }
@@ -656,10 +705,11 @@ async function startBot() {
 // ========== ЗАПУСК СЕРВЕРА ==========
 const server = app.listen(PORT, '0.0.0.0', () => {
   console.log(`🌐 Сервер на порту ${PORT}`);
-  console.log(`🤖 Версия: 3.2 (упрощенная и надежная)`);
+  console.log(`🤖 Версия: 3.3 (режим совместимости)`);
   console.log(`📊 API эндпоинты:`);
   console.log(`   POST /api/send-message`);
   console.log(`   GET  /api/user/:chat_id/status`);
+  console.log(`   GET  /api/debug/db-structure`);
   console.log(`   GET  /health`);
   
   // Даем время на инициализацию
@@ -679,4 +729,4 @@ process.on('SIGTERM', () => {
   process.exit(0);
 });
 
-console.log('🚀 Система инициализирована');
+console.log('🚀 Система инициализирована в режиме совместимости');
