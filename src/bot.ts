@@ -23,7 +23,16 @@ app.use(express.json());
 const mainMenu = Markup.keyboard([
   ['🔑 Отправить API-ключ'],
   ['📊 Мой статус', '🆘 Помощь'],
-  ['📞 Связаться с поддержкой']
+  ['📞 Связаться с поддержкой'],
+  ['🎫 Оформить подписку на 30 дней'] // Новая кнопка
+]).resize();
+
+const adminMenu = Markup.keyboard([
+  ['🔑 Отправить API-ключ'],
+  ['📊 Мой статус', '🆘 Помощь'],
+  ['📞 Связаться с поддержкой'],
+  ['🎫 Оформить подписку на 30 дней'], // Новая кнопка
+  ['⚡ Активировать подписку', '🆓 Активировать пробную версию']
 ]).resize();
 
 const removeKeyboard = Markup.removeKeyboard();
@@ -52,8 +61,6 @@ async function getDbConnection(retries = 3, delay = 2000) {
   }
 }
 
-// ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
-
 async function executeQuery(query, params = []) {
   let db;
   try {
@@ -71,87 +78,17 @@ async function executeQuery(query, params = []) {
   }
 }
 
-/**
- * Сохраняет информацию о пользователе при /start
- * Имя сохраняем в поле platform или создаем новую таблицу для пользователей
- */
-async function saveUserInfo(chatId, firstName, lastName = '', username = '') {
-  try {
-    // Сначала проверяем структуру таблицы
-    const structure = await executeQuery(`
-      SELECT column_name 
-      FROM information_schema.columns 
-      WHERE table_name = 'api_keys'
-    `);
-    
-    const columns = structure.rows.map(row => row.column_name);
-    const hasFirstName = columns.includes('first_name');
-    const hasLastName = columns.includes('last_name');
-    const hasUsername = columns.includes('username');
-    
-    // Формируем полное имя
-    const fullName = `${firstName}${lastName ? ' ' + lastName : ''}`;
-    
-    // Сохраняем в зависимости от структуры таблицы
-    if (hasFirstName && hasLastName) {
-      // Есть отдельные поля для имени
-      await executeQuery(
-        `INSERT INTO api_keys 
-         (chat_id, first_name, last_name, username, platform, created_at, updated_at) 
-         VALUES ($1, $2, $3, $4, $5, NOW(), NOW())
-         ON CONFLICT (chat_id) DO UPDATE SET
-         first_name = $2, last_name = $3, username = $4, platform = $5, updated_at = NOW()`,
-        [chatId, firstName, lastName, username, 'telegram_user']
-      );
-    } else if (columns.includes('user_info')) {
-      // Есть поле user_info (JSON)
-      const userInfo = JSON.stringify({
-        first_name: firstName,
-        last_name: lastName,
-        username: username,
-        full_name: fullName
-      });
-      
-      await executeQuery(
-        `INSERT INTO api_keys 
-         (chat_id, user_info, platform, created_at, updated_at) 
-         VALUES ($1, $2, $3, NOW(), NOW())
-         ON CONFLICT (chat_id) DO UPDATE SET
-         user_info = $2, platform = $3, updated_at = NOW()`,
-        [chatId, userInfo, 'telegram_user']
-      );
-    } else {
-      // Сохраняем имя в поле platform
-      await executeQuery(
-        `INSERT INTO api_keys 
-         (chat_id, platform, created_at, updated_at) 
-         VALUES ($1, $2, NOW(), NOW())
-         ON CONFLICT (chat_id) DO UPDATE SET
-         platform = $2, updated_at = NOW()`,
-        [chatId, `user:${fullName}`]
-      );
-    }
-    
-    console.log(`✅ Информация о пользователе сохранена: ${fullName} (${chatId})`);
-    return true;
-    
-  } catch (error) {
-    console.error('❌ Ошибка сохранения информации о пользователе:', error.message);
-    return false;
-  }
-}
+// ========== ФУНКЦИИ ДЛЯ ПОДПИСОК ==========
 
 /**
  * Проверяет подписку пользователя
- * Для совместимости используем поле platform для хранения статуса подписки
  */
 async function checkUserSubscription(chatId) {
   try {
-    // Сначала пробуем получить статус из поля subscription_status
     const result = await executeQuery(
-      `SELECT platform, created_at 
+      `SELECT subscription_status, subscription_expires_at 
        FROM api_keys 
-       WHERE chat_id = $1 
+       WHERE telegram_chat_id = $1 
        ORDER BY created_at DESC 
        LIMIT 1`,
       [chatId]
@@ -159,176 +96,184 @@ async function checkUserSubscription(chatId) {
     
     if (result.rows.length === 0) {
       return { 
-        isValid: false, // Новый пользователь - нет подписки
-        status: 'new_user',
+        status: 'none',
         expiresAt: null,
-        message: 'Новый пользователь. Требуется активация подписки.'
+        isValid: true, // ИЗМЕНЕНО: для тестирования всегда true
+        message: 'Подписка не активирована (тестовый режим)'
       };
     }
     
     const row = result.rows[0];
-    const platform = row.platform || '';
-    const createdAt = new Date(row.created_at);
-    const now = new Date();
+    const status = row.subscription_status;
+    const expiresAt = row.subscription_expires_at;
     
-    // Проверяем разные варианты хранения статуса в поле platform
-    if (platform.includes('subscription:active') || platform.includes('status:active')) {
+    // Если подписка истекла по времени
+    if (expiresAt && new Date(expiresAt) < new Date()) {
+      await executeQuery(
+        `UPDATE api_keys 
+         SET subscription_status = 'expired'
+         WHERE telegram_chat_id = $1 AND subscription_status != 'expired'`,
+        [chatId]
+      );
       return {
-        isValid: true,
-        status: 'active',
-        expiresAt: null,
-        message: 'Подписка активна'
-      };
-    } else if (platform.includes('subscription:trial') || platform.includes('status:trial')) {
-      // Проверяем не истек ли триал (14 дней)
-      const trialDays = 14;
-      const trialExpires = new Date(createdAt);
-      trialExpires.setDate(trialExpires.getDate() + trialDays);
-      
-      const isValid = now < trialExpires;
-      
-      return {
-        isValid: isValid,
-        status: isValid ? 'trial' : 'trial_expired',
-        expiresAt: trialExpires,
-        message: isValid ? `Триал активен до ${trialExpires.toLocaleDateString('ru-RU')}` : 'Триал истек'
-      };
-    } else if (platform.includes('subscription:expired') || platform.includes('status:expired')) {
-      return {
-        isValid: false,
         status: 'expired',
-        expiresAt: null,
-        message: 'Подписка истекла'
+        expiresAt: expiresAt,
+        isValid: true, // ИЗМЕНЕНО: для тестирования всегда true
+        message: 'Подписка истекла (но в тестовом режиме всё работает)'
       };
     }
     
-    // Если статус не указан - считаем что подписка не активирована
+    // Проверяем валидность
+    // ИЗМЕНЕНО: для тестирования всегда возвращаем true
+    const isValid = true; // (status === 'active' || status === 'trial') && (!expiresAt || new Date(expiresAt) > new Date());
+    
+    let message = '';
+    if (status === 'active' && isValid) {
+      message = '✅ Подписка активна';
+    } else if (status === 'trial' && isValid) {
+      const daysLeft = Math.ceil((new Date(expiresAt) - new Date()) / (1000 * 60 * 60 * 24));
+      message = `🆓 Пробная версия (осталось ${daysLeft} дней)`;
+    } else if (status === 'expired') {
+      message = '❌ Подписка истекла (тестовый режим)';
+    } else if (!status || status === 'none') {
+      message = '⏳ Подписка не активирована (тестовый режим)';
+    } else {
+      message = `Статус: ${status} (тестовый режим)`;
+    }
+    
     return {
-      isValid: false,
-      status: 'inactive',
-      expiresAt: null,
-      message: 'Подписка не активирована'
+      status: status || 'none',
+      expiresAt: expiresAt,
+      isValid: isValid,
+      message: message
     };
     
   } catch (error) {
     console.error('❌ Ошибка проверки подписки:', error.message);
-    return {
-      isValid: false,
+    return { 
       status: 'error',
       expiresAt: null,
-      message: 'Ошибка проверки подписки'
+      isValid: true, // ИЗМЕНЕНО: для тестирования всегда true
+      message: 'Ошибка проверки подписки (тестовый режим)'
     };
   }
 }
 
 /**
- * Обновляет статус подписки пользователя
+ * Активирует подписку на 30 дней
  */
-async function updateSubscriptionStatus(chatId, status, expiresAt = null) {
+async function activate30DaySubscription(chatId) {
   try {
-    let platformValue = '';
+    const expiresAt = new Date();
+    expiresAt.setDate(expiresAt.getDate() + 30); // 30 дней
     
-    switch (status) {
-      case 'active':
-        platformValue = 'subscription:active';
-        break;
-      case 'trial':
-        platformValue = 'subscription:trial';
-        break;
-      case 'expired':
-        platformValue = 'subscription:expired';
-        break;
-      default:
-        platformValue = `subscription:${status}`;
-    }
-    
-    if (expiresAt) {
-      platformValue += `:expires:${expiresAt.toISOString()}`;
-    }
-    
-    await executeQuery(
-      `UPDATE api_keys 
-       SET platform = $1, updated_at = NOW() 
-       WHERE chat_id = $2`,
-      [platformValue, chatId]
+    // Проверяем, есть ли пользователь
+    const existing = await executeQuery(
+      `SELECT id FROM api_keys WHERE telegram_chat_id = $1`,
+      [chatId]
     );
     
-    console.log(`✅ Статус подписки обновлен: ${chatId} -> ${status}`);
-    return true;
-    
-  } catch (error) {
-    console.error('❌ Ошибка обновления статуса подписки:', error.message);
-    return false;
-  }
-}
-
-/**
- * Сохраняет API-ключ с проверкой подписки
- */
-async function saveApiKeyWithCheck(chatId, apiKeyText, firstName) {
-  try {
-    // Проверяем подписку
-    const subscription = await checkUserSubscription(chatId);
-    
-    if (!subscription.isValid) {
-      return {
-        success: false,
-        reason: 'subscription_invalid',
-        message: `❌ *Не удалось сохранить ключ*\n\n` +
-                `${subscription.message}\n\n` +
-                `📞 Для активации подписки свяжитесь с поддержкой:\n` +
-                `📧 support@skayfol.com`
-      };
+    if (existing.rows.length > 0) {
+      // Обновляем существующую запись
+      await executeQuery(
+        `UPDATE api_keys 
+         SET subscription_status = 'active', 
+             subscription_expires_at = $1,
+             updated_at = NOW()
+         WHERE telegram_chat_id = $2`,
+        [expiresAt, chatId]
+      );
+    } else {
+      // Создаем новую запись (без API-ключа)
+      await executeQuery(
+        `INSERT INTO api_keys 
+         (telegram_chat_id, subscription_status, subscription_expires_at, platform, created_at, updated_at) 
+         VALUES ($1, $2, $3, $4, NOW(), NOW())`,
+        [chatId, 'active', expiresAt, 'user']
+      );
     }
     
-    // Проверяем дубликат
-    const duplicateCheck = await executeQuery(
-      `SELECT created_at FROM api_keys 
-       WHERE chat_id = $1 AND api_key = $2 
-       AND api_key IS NOT NULL`,
-      [chatId, apiKeyText]
-    );
-    
-    if (duplicateCheck.rows.length > 0) {
-      const savedAt = new Date(duplicateCheck.rows[0].created_at).toLocaleString('ru-RU');
-      return {
-        success: false,
-        reason: 'duplicate_key',
-        message: `⚠️ *Этот ключ уже был сохранён!*\n\n` +
-                `_Дата сохранения: ${savedAt}_\n\n` +
-                `Если нужно обновить ключ - свяжитесь с поддержкой.`
-      };
-    }
-    
-    // Сохраняем ключ
-    await executeQuery(
-      `INSERT INTO api_keys 
-       (chat_id, api_key, platform, created_at, updated_at) 
-       VALUES ($1, $2, $3, NOW(), NOW())`,
-      [chatId, apiKeyText, 'api_key_saved']
-    );
-    
-    // Обновляем информацию о пользователе (если имя есть)
-    if (firstName) {
-      await saveUserInfo(chatId, firstName);
-    }
+    console.log(`✅ 30-дневная подписка активирована: ${chatId}`);
     
     return {
       success: true,
-      message: `✅ *Ключ успешно сохранён, ${firstName || 'пользователь'}!*\n\n` +
-              `Мы начали обработку ваших данных.\n` +
-              `Вы получите уведомление когда анализ будет готов.\n\n` +
-              `_Обычно это занимает 5-15 минут_`
+      expiresAt: expiresAt
     };
     
   } catch (error) {
-    console.error('❌ Ошибка сохранения ключа:', error.message);
+    console.error('❌ Ошибка активации подписки:', error.message);
     return {
       success: false,
-      reason: 'database_error',
-      message: '⚠️ *Ошибка сервера*\n\nПожалуйста, попробуйте позже.'
+      error: error.message
     };
   }
+}
+
+/**
+ * Активирует подписку для пользователя (админ)
+ */
+async function activateSubscription(targetChatId, type = 'active', adminName = '') {
+  try {
+    let expiresAt = null;
+    
+    if (type === 'trial') {
+      expiresAt = new Date();
+      expiresAt.setDate(expiresAt.getDate() + 10); // 10 дней
+    } else if (type === 'active') {
+      expiresAt = new Date();
+      expiresAt.setDate(expiresAt.getDate() + 30); // 30 дней
+    }
+    
+    // Проверяем, есть ли пользователь
+    const existing = await executeQuery(
+      `SELECT id FROM api_keys WHERE telegram_chat_id = $1`,
+      [targetChatId]
+    );
+    
+    if (existing.rows.length > 0) {
+      // Обновляем существующую запись
+      await executeQuery(
+        `UPDATE api_keys 
+         SET subscription_status = $1, 
+             subscription_expires_at = $2,
+             updated_at = NOW()
+         WHERE telegram_chat_id = $3`,
+        [type, expiresAt, targetChatId]
+      );
+    } else {
+      // Создаем новую запись (без API-ключа)
+      await executeQuery(
+        `INSERT INTO api_keys 
+         (telegram_chat_id, subscription_status, subscription_expires_at, platform, created_at, updated_at) 
+         VALUES ($1, $2, $3, $4, NOW(), NOW())`,
+        [targetChatId, type, expiresAt, 'user']
+      );
+    }
+    
+    console.log(`✅ Подписка активирована: ${targetChatId} -> ${type}`);
+    
+    return {
+      success: true,
+      type: type,
+      expiresAt: expiresAt
+    };
+    
+  } catch (error) {
+    console.error('❌ Ошибка активации подписки:', error.message);
+    return {
+      success: false,
+      error: error.message
+    };
+  }
+}
+
+/**
+ * Проверяет права администратора
+ */
+function isAdmin(chatId) {
+  // Добавьте сюда chat_id администраторов
+  const adminIds = [7909570066]; // Ваш chat_id
+  return adminIds.includes(chatId);
 }
 
 // ========== API ЭНДПОИНТЫ ==========
@@ -352,59 +297,6 @@ app.post('/api/send-message', async (req, res) => {
   }
 });
 
-// Эндпоинт для установки статуса подписки
-app.post('/api/user/:chat_id/subscription', async (req, res) => {
-  try {
-    const chatId = parseInt(req.params.chat_id);
-    const { status, expires_at } = req.body;
-    
-    if (isNaN(chatId) || !status) {
-      return res.status(400).json({ error: 'Нужны chat_id и status' });
-    }
-    
-    const expiresAt = expires_at ? new Date(expires_at) : null;
-    const success = await updateSubscriptionStatus(chatId, status, expiresAt);
-    
-    if (success) {
-      res.json({ 
-        success: true, 
-        message: `Статус подписки для ${chatId} установлен: ${status}` 
-      });
-    } else {
-      res.status(500).json({ error: 'Ошибка обновления статуса' });
-    }
-    
-  } catch (error) {
-    console.error('❌ [API] Ошибка обновления подписки:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Проверка статуса подписки
-app.get('/api/user/:chat_id/status', async (req, res) => {
-  try {
-    const chatId = parseInt(req.params.chat_id);
-    
-    if (isNaN(chatId)) {
-      return res.status(400).json({ error: 'Некорректный chat_id' });
-    }
-    
-    const subscription = await checkUserSubscription(chatId);
-    
-    res.json({
-      telegram_chat_id: chatId,
-      subscription_status: subscription.status,
-      is_valid: subscription.isValid,
-      message: subscription.message,
-      expires_at: subscription.expiresAt
-    });
-    
-  } catch (error) {
-    console.error('❌ [API] Ошибка проверки статуса:', error);
-    res.status(500).json({ error: 'Ошибка сервера' });
-  }
-});
-
 app.get('/health', async (req, res) => {
   try {
     await executeQuery('SELECT 1 as status');
@@ -412,15 +304,15 @@ app.get('/health', async (req, res) => {
       status: 'ok', 
       bot: 'operational',
       database: 'connected',
-      version: '4.0',
-      features: ['subscription-check', 'user-info', 'api-keys']
+      version: '6.0',
+      features: ['subscription-management', '30-day-subscription', 'test-mode-enabled']
     });
   } catch (error) {
     res.json({ 
       status: 'degraded', 
       bot: 'operational',
       database: 'disconnected',
-      version: '4.0'
+      version: '6.0'
     });
   }
 });
@@ -429,87 +321,248 @@ app.get('/health', async (req, res) => {
 bot.start(async (ctx) => {
   const chatId = ctx.chat.id;
   const firstName = ctx.from.first_name || '';
-  const lastName = ctx.from.last_name || '';
-  const username = ctx.from.username || '';
   
-  console.log(`🚀 /start от ${chatId} (${firstName} ${lastName} @${username})`);
+  console.log(`🚀 /start от ${chatId} (${firstName})`);
   
   try {
-    // Сохраняем информацию о пользователе
-    await saveUserInfo(chatId, firstName, lastName, username);
-    
-    // Проверяем подписку
     const subscription = await checkUserSubscription(chatId);
+    const menuToShow = isAdmin(chatId) ? adminMenu : mainMenu;
     
-    let subscriptionMessage = '';
-    if (subscription.isValid) {
-      subscriptionMessage = `\n✅ *Ваша подписка активна*`;
-      if (subscription.expiresAt) {
-        const expiresDate = subscription.expiresAt.toLocaleDateString('ru-RU');
-        subscriptionMessage += ` (до ${expiresDate})`;
-      }
-    } else {
-      subscriptionMessage = `\n⚠️ *${subscription.message}*`;
-    }
-    
-    // Приветственное сообщение с именем
-    const greeting = firstName ? `, ${firstName}!` : '!';
+    let greeting = firstName ? `, ${firstName}!` : '!';
+    let adminNote = isAdmin(chatId) ? '\n\n👑 *Вы администратор*' : '';
+    let testNote = '\n\n⚠️ *Включен тестовый режим* - ключи принимаются без подписки';
     
     await ctx.reply(
       `*🔐 Skayfol Analytics*\n\n` +
-      `Добро пожаловать в систему аналитики рекламных кампаний${greeting}\n\n` +
-      `${subscriptionMessage}\n\n` +
-      `*Что умеет бот:*\n` +
-      `✅ Сохраняет ваши API-ключи\n` +
-      `✅ Проверяет статус подписки\n` +
-      `✅ Уведомляет о результатах анализа\n\n` +
+      `Добро пожаловать${greeting}\n\n` +
+      `📋 *Статус подписки:* ${subscription.message}${testNote}${adminNote}\n\n` +
       `Выберите действие:`,
       { 
         parse_mode: 'Markdown',
-        ...mainMenu 
+        ...menuToShow 
       }
     );
     
   } catch (error) {
     console.error('❌ Ошибка при старте:', error.message);
-    
-    // Простое приветствие при ошибке
-    const greeting = firstName ? `, ${firstName}!` : '!';
     await ctx.reply(
-      `Привет${greeting} Добро пожаловать в Skayfol Analytics!\n\n` +
-      `Выберите действие:`,
+      `Добро пожаловать! Выберите действие:`,
       mainMenu
     );
   }
 });
 
-// ========== КНОПКА: ОТПРАВИТЬ API-КЛЮЧ ==========
-bot.hears('🔑 Отправить API-ключ', async (ctx) => {
+// ========== НОВАЯ КНОПКА: ОФОРМИТЬ ПОДПИСКУ НА 30 ДНЕЙ ==========
+bot.hears('🎫 Оформить подписку на 30 дней', async (ctx) => {
+  const chatId = ctx.chat.id;
+  const firstName = ctx.from.first_name || '';
+  
   await ctx.reply(
-    'Отправьте ваш API-ключ *одной строкой*.\n\n' +
-    '_Ключ должен быть длинным (от 30 символов)_',
+    `*🎫 Оформление подписки на 30 дней*\n\n` +
+    `Стоимость: *3000 руб.*\n` +
+    `Срок действия: *30 дней*\n\n` +
+    `Для оформления подписки:\n` +
+    `1. Оплатите 3000 руб. на карту *xxxx xxxx xxxx xxxx*\n` +
+    `2. Отправьте скриншот оплаты в поддержку\n` +
+    `3. Мы активируем подписку в течение 24 часов\n\n` +
+    `📞 *Контакты поддержки:*\n` +
+    `📧 Email: support@skayfol.com\n` +
+    `🌐 Сайт: https://skayfol.com`,
     { 
       parse_mode: 'Markdown',
-      ...removeKeyboard 
+      ...(isAdmin(chatId) ? adminMenu : mainMenu)
     }
   );
 });
 
-// ========== КНОПКА: МОЙ СТАТУС ==========
-bot.hears('📊 Мой статус', async (ctx) => {
-  const chatId = ctx.chat.id;
-  const firstName = ctx.from.first_name || 'пользователь';
+// ========== КНОПКИ УПРАВЛЕНИЯ ПОДПИСКАМИ (АДМИН) ==========
+bot.hears('⚡ Активировать подписку', async (ctx) => {
+  if (!isAdmin(ctx.chat.id)) {
+    await ctx.reply('❌ Доступ только для администраторов', mainMenu);
+    return;
+  }
   
-  try {
+  await ctx.reply(
+    'Введите *Telegram ID* для активации полной подписки (30 дней):\n' +
+    '_Только цифры (пример: 7909570066)_',
+    { parse_mode: 'Markdown', ...removeKeyboard }
+  );
+  
+  ctx.session = { action: 'activate_subscription' };
+});
+
+bot.hears('🆓 Активировать пробную версию', async (ctx) => {
+  if (!isAdmin(ctx.chat.id)) {
+    await ctx.reply('❌ Доступ только для администраторов', mainMenu);
+    return;
+  }
+  
+  await ctx.reply(
+    'Введите *Telegram ID* для активации пробной версии (10 дней):\n' +
+    '_Только цифры (пример: 7909570066)_',
+    { parse_mode: 'Markdown', ...removeKeyboard }
+  );
+  
+  ctx.session = { action: 'activate_trial' };
+});
+
+// ========== ОБРАБОТКА ТЕКСТА ==========
+bot.on('text', async (ctx) => {
+  const text = ctx.message.text;
+  const chatId = ctx.chat.id;
+  const firstName = ctx.from.first_name || '';
+  
+  // Пропускаем команды и кнопки
+  const buttons = ['🔑 Отправить API-ключ', '📊 Мой статус', '🆘 Помощь', '📞 Связаться с поддержкой',
+                  '🎫 Оформить подписку на 30 дней', '⚡ Активировать подписку', '🆓 Активировать пробную версию'];
+  
+  if (text.startsWith('/') || buttons.includes(text)) {
+    return;
+  }
+  
+  // Обработка активации подписки (админ)
+  if (ctx.session?.action && (ctx.session.action === 'activate_subscription' || ctx.session.action === 'activate_trial')) {
+    const targetChatId = parseInt(text);
+    
+    if (isNaN(targetChatId)) {
+      await ctx.reply('❌ Некорректный ID. Введите только цифры.', adminMenu);
+      return;
+    }
+    
+    const subscriptionType = ctx.session.action === 'activate_subscription' ? 'active' : 'trial';
+    const result = await activateSubscription(targetChatId, subscriptionType, firstName);
+    
+    if (result.success) {
+      let msg = `✅ *Подписка активирована!*\n\n`;
+      msg += `👤 Пользователь: ${targetChatId}\n`;
+      msg += `📋 Тип: ${subscriptionType === 'active' ? 'Полная подписка (30 дней)' : 'Пробная версия (10 дней)'}\n`;
+      
+      if (result.expiresAt) {
+        msg += `📅 Действует до: ${result.expiresAt.toLocaleDateString('ru-RU')}\n`;
+      }
+      
+      await ctx.reply(msg, { parse_mode: 'Markdown', ...adminMenu });
+      
+      // Уведомляем пользователя
+      try {
+        await bot.telegram.sendMessage(
+          targetChatId,
+          `🎉 *Ваша подписка активирована!*\n\n` +
+          `Тип: *${subscriptionType === 'active' ? 'Полная подписка (30 дней)' : 'Пробная версия (10 дней)'}*\n` +
+          `Действует до: *${result.expiresAt.toLocaleDateString('ru-RU')}*\n\n` +
+          `Теперь вы можете добавлять API-ключи!`,
+          { parse_mode: 'Markdown', ...mainMenu }
+        );
+      } catch (error) {
+        console.log(`⚠️ Не удалось уведомить пользователя ${targetChatId}`);
+      }
+    } else {
+      await ctx.reply(
+        `❌ Ошибка: ${result.error}`,
+        adminMenu
+      );
+    }
+    
+    delete ctx.session;
+    return;
+  }
+  
+  // Проверка API-ключа (ТЕСТОВЫЙ РЕЖИМ - ПРОВЕРКА ОТКЛЮЧЕНА)
+  if (text.length > 25 && /[a-zA-Z0-9._-]{25,}/.test(text)) {
+    console.log(`🔑 Попытка сохранения ключа от ${chatId} (тестовый режим)`);
+    
+    // ⚠️ ЗАКОММЕНТИРОВАНА ПРОВЕРКА ПОДПИСКИ ДЛЯ ТЕСТИРОВАНИЯ ⚠️
+    /*
     // Проверяем подписку
     const subscription = await checkUserSubscription(chatId);
     
-    // Получаем статистику по ключам
+    if (!subscription.isValid) {
+      await ctx.reply(
+        `❌ *Не удалось сохранить ключ*\n\n` +
+        `${subscription.message}\n\n` +
+        `Обратитесь к администратору для активации подписки.`,
+        { parse_mode: 'Markdown', ...(isAdmin(chatId) ? adminMenu : mainMenu) }
+      );
+      return;
+    }
+    */
+    
+    // Проверка дубликата
+    const duplicateCheck = await executeQuery(
+      `SELECT created_at FROM api_keys 
+       WHERE telegram_chat_id = $1 AND api_key = $2`,
+      [chatId, text]
+    );
+    
+    if (duplicateCheck.rows.length > 0) {
+      const savedAt = new Date(duplicateCheck.rows[0].created_at).toLocaleString('ru-RU');
+      await ctx.reply(
+        `⚠️ *Этот ключ уже сохранен!*\n\n` +
+        `Дата: ${savedAt}`,
+        { parse_mode: 'Markdown', ...(isAdmin(chatId) ? adminMenu : mainMenu) }
+      );
+      return;
+    }
+    
+    // Сохраняем ключ
+    try {
+      await executeQuery(
+        `INSERT INTO api_keys 
+         (telegram_chat_id, api_key, platform, created_at, updated_at) 
+         VALUES ($1, $2, $3, NOW(), NOW())`,
+        [chatId, text, 'api_key_saved']
+      );
+      
+      console.log(`✅ Ключ сохранен в БД для пользователя ${chatId}`);
+      
+      await ctx.reply(
+        `✅ *Ключ успешно сохранен!*\n\n` +
+        `🔑 *Статус:* Принят в обработку\n` +
+        `⏰ *Время:* ${new Date().toLocaleString('ru-RU')}\n\n` +
+        `Мы начали анализ ваших данных. Результаты будут готовы в течение 5-15 минут.`,
+        { parse_mode: 'Markdown', ...(isAdmin(chatId) ? adminMenu : mainMenu) }
+      );
+      
+    } catch (error) {
+      console.error('❌ Ошибка сохранения ключа:', error.message);
+      await ctx.reply(
+        `❌ *Ошибка сохранения ключа*\n\n` +
+        `Пожалуйста, попробуйте позже или обратитесь в поддержку.`,
+        { parse_mode: 'Markdown', ...(isAdmin(chatId) ? adminMenu : mainMenu) }
+      );
+    }
+    
+  } else {
+    // Не ключ
+    await ctx.reply(
+      'Используйте кнопки меню или отправьте API-ключ.',
+      isAdmin(chatId) ? adminMenu : mainMenu
+    );
+  }
+});
+
+// ========== ОСТАЛЬНЫЕ КНОПКИ ==========
+bot.hears('🔑 Отправить API-ключ', async (ctx) => {
+  await ctx.reply(
+    'Отправьте API-ключ одной строкой (от 30 символов):\n\n' +
+    '_Пример: sk_live_51Hmy9CMS8t7jN3pM5v8JkLx..._\n\n' +
+    '⚠️ *ТЕСТОВЫЙ РЕЖИМ:* Ключи принимаются без подписки',
+    { parse_mode: 'Markdown', ...removeKeyboard }
+  );
+});
+
+bot.hears('📊 Мой статус', async (ctx) => {
+  const chatId = ctx.chat.id;
+  const firstName = ctx.from.first_name || '';
+  
+  try {
+    const subscription = await checkUserSubscription(chatId);
+    
     const stats = await executeQuery(
       `SELECT COUNT(*) as total_keys, 
               MAX(created_at) as last_key_added
        FROM api_keys 
-       WHERE chat_id = $1 AND api_key IS NOT NULL`,
+       WHERE telegram_chat_id = $1 AND api_key IS NOT NULL`,
       [chatId]
     );
     
@@ -518,132 +571,92 @@ bot.hears('📊 Мой статус', async (ctx) => {
       ? new Date(stats.rows[0].last_key_added).toLocaleString('ru-RU')
       : 'ещё нет';
     
-    // Формируем сообщение
-    let statusMessage = `*📊 Ваша статистика, ${firstName}*\n\n`;
-    statusMessage += `👤 *Telegram ID:* ${chatId}\n\n`;
-    statusMessage += `📋 *Статус подписки:* ${subscription.status}\n`;
+    let msg = `*📊 Ваша статистика${firstName ? ', ' + firstName : ''}*\n\n`;
+    msg += `👤 *Telegram ID:* ${chatId}\n`;
+    msg += `📋 *Статус подписки:* ${subscription.message}\n`;
     
     if (subscription.expiresAt) {
-      const expiresDate = subscription.expiresAt.toLocaleDateString('ru-RU');
-      statusMessage += `📅 *Действует до:* ${expiresDate}\n`;
+      msg += `📅 *Действует до:* ${new Date(subscription.expiresAt).toLocaleDateString('ru-RU')}\n`;
     }
     
-    statusMessage += `\n🔑 *Ключей сохранено:* ${totalKeys}\n`;
-    statusMessage += `⏰ *Последний добавлен:* ${lastKeyAdded}\n\n`;
-    
-    if (subscription.isValid) {
-      statusMessage += `_Статус обработки: ✅ активен_`;
-    } else {
-      statusMessage += `_Статус обработки: ⚠️ ограничен (нельзя добавлять новые ключи)_`;
-    }
+    msg += `\n🔑 *Ключей сохранено:* ${totalKeys}\n`;
+    msg += `⏰ *Последний ключ:* ${lastKeyAdded}\n\n`;
+    msg += `⚙️ *Режим работы:* Тестовый (все операции разрешены)`;
     
     await ctx.reply(
-      statusMessage,
-      { 
-        parse_mode: 'Markdown',
-        ...mainMenu 
-      }
+      msg,
+      { parse_mode: 'Markdown', ...(isAdmin(chatId) ? adminMenu : mainMenu) }
     );
     
   } catch (error) {
     console.error('❌ Ошибка получения статуса:', error.message);
     await ctx.reply(
-      `⚠️ *Временная ошибка, ${firstName}*\n\n` +
-      'Не удалось получить статистику. Пожалуйста, попробуйте позже.',
-      mainMenu
+      `⚠️ Ошибка получения статуса. Пожалуйста, попробуйте позже.`,
+      isAdmin(chatId) ? adminMenu : mainMenu
     );
   }
 });
 
-// ========== ОСТАЛЬНЫЕ КНОПКИ (без изменений) ==========
 bot.hears('🆘 Помощь', async (ctx) => {
   await ctx.reply(
-    `*❓ Частые вопросы:*\n\n` +
-    `🔹 *Где взять API-ключ?*\n` +
-    `В настройках вашего рекламного кабинета\n\n` +
-    `🔹 *Ключ не принимается?*\n` +
-    `1. Убедитесь что скопировали полностью (30+ символов)\n` +
-    `2. Проверьте статус подписки\n\n` +
-    `🔹 *Как проверить статус подписки?*\n` +
-    `Нажмите кнопку "📊 Мой статус"\n\n` +
-    `🔹 *Почему не принимает ключ?*\n` +
-    `Если статус подписки не активен - обратитесь в поддержку.`,
-    { 
-      parse_mode: 'Markdown',
-      ...mainMenu 
-    }
+    `*❓ Помощь и поддержка*\n\n` +
+    `🔹 *Как отправить API-ключ?*\n` +
+    `Нажмите "🔑 Отправить API-ключ" и отправьте ключ\n\n` +
+    `🔹 *Как оформить подписку?*\n` +
+    `Нажмите "🎫 Оформить подписку на 30 дней"\n\n` +
+    `🔹 *Текущий режим:*\n` +
+    `✅ Тестовый - ключи принимаются без подписки\n\n` +
+    `🔹 *Контакты поддержки:*\n` +
+    `📧 support@skayfol.com\n` +
+    `🌐 https://skayfol.com`,
+    { parse_mode: 'Markdown', ...(isAdmin(ctx.chat.id) ? adminMenu : mainMenu) }
   );
 });
 
 bot.hears('📞 Связаться с поддержкой', async (ctx) => {
   await ctx.reply(
     `*📞 Контакты поддержки*\n\n` +
-    `📧 Email: support@skayfol.com\n` +
-    `🌐 Сайт: https://skayfol.com\n` +
-    `⏰ Часы работы: 9:00-18:00 (МСК)\n\n` +
-    `_Ответим в течение 24 часов_`,
-    { 
-      parse_mode: 'Markdown',
-      ...mainMenu 
-    }
+    `📧 *Email:* support@skayfol.com\n` +
+    `🌐 *Сайт:* https://skayfol.com\n` +
+    `⏰ *Часы работы:* 9:00-18:00 (МСК)\n\n` +
+    `_Ответ в течение 24 часов_\n\n` +
+    `*По вопросам:*\n` +
+    `• Активации подписки\n` +
+    `• Проблем с API-ключами\n` +
+    `• Технической поддержки`,
+    { parse_mode: 'Markdown', ...(isAdmin(ctx.chat.id) ? adminMenu : mainMenu) }
   );
 });
 
-// ========== ОБРАБОТКА API-КЛЮЧЕЙ ==========
-bot.on('text', async (ctx) => {
-  const text = ctx.message.text;
-  const chatId = ctx.chat.id;
-  const firstName = ctx.from.first_name || '';
-  
-  if (text.startsWith('/') || 
-      ['🔑 Отправить API-ключ', '📊 Мой статус', '🆘 Помощь', '📞 Связаться с поддержкой'].includes(text)) {
-    return;
-  }
-  
-  if (text.length > 25 && /[a-zA-Z0-9._-]{25,}/.test(text)) {
-    console.log(`🔑 Попытка сохранения ключа от ${chatId} (${firstName})`);
-    
-    const result = await saveApiKeyWithCheck(chatId, text, firstName);
-    
-    await ctx.reply(
-      result.message,
-      { 
-        parse_mode: 'Markdown',
-        ...mainMenu 
-      }
-    );
-    
-  } else {
-    await ctx.reply(
-      'Пожалуйста, используйте кнопки меню или отправьте API-ключ.',
-      mainMenu
-    );
-  }
+// ========== ЗАПУСК ==========
+bot.use((ctx, next) => {
+  if (!ctx.session) ctx.session = {};
+  return next();
 });
 
-// ========== ЗАПУСК ==========
 async function startBot() {
   try {
     await bot.telegram.deleteWebhook();
-    console.log('✅ Очищены старые webhook');
-    
     await bot.launch();
-    console.log('✅ Бот запущен');
-    
+    console.log('✅ Бот запущен в тестовом режиме');
+    console.log('⚠️ ПРОВЕРКА ПОДПИСОК ОТКЛЮЧЕНА');
+    console.log('✅ API-ключи принимаются без ограничений');
   } catch (error) {
-    console.error('❌ Ошибка запуска бота:', error.message);
+    console.error('❌ Ошибка запуска:', error.message);
     setTimeout(startBot, 10000);
   }
 }
 
 const server = app.listen(PORT, '0.0.0.0', () => {
   console.log(`🌐 Сервер на порту ${PORT}`);
-  console.log(`🤖 Версия: 4.0 (с проверкой подписок)`);
+  console.log(`🤖 Версия: 6.0 (тестовый режим)`);
   console.log(`📊 API эндпоинты:`);
   console.log(`   POST /api/send-message`);
-  console.log(`   POST /api/user/:chat_id/subscription`);
-  console.log(`   GET  /api/user/:chat_id/status`);
   console.log(`   GET  /health`);
+  console.log(`\n⚙️  РЕЖИМ РАБОТЫ:`);
+  console.log(`   ✅ Прием API-ключей: ВКЛЮЧЕН`);
+  console.log(`   ⚠️ Проверка подписок: ОТКЛЮЧЕНА`);
+  console.log(`   👑 Админ-панель: ДОСТУПНА`);
   
   setTimeout(startBot, 2000);
 });
@@ -655,4 +668,4 @@ process.on('SIGTERM', () => {
   process.exit(0);
 });
 
-console.log('🚀 Система инициализирована');
+console.log('🚀 Бот инициализирован в тестовом режиме');
