@@ -16,8 +16,6 @@ if (!BOT_TOKEN || !DB_URL) {
 }
 
 console.log('🤖 Инициализация бота...');
-console.log('🔑 BOT_TOKEN есть:', !!BOT_TOKEN);
-console.log('🗄️  DATABASE_URL есть:', !!DB_URL);
 
 const bot = new Telegraf(BOT_TOKEN);
 const app = express();
@@ -51,7 +49,6 @@ async function getDbConnection(retries = 3, delay = 2000) {
       });
       
       await db.connect();
-      console.log('✅ Подключение к БД успешно');
       return db;
       
     } catch (error) {
@@ -100,9 +97,10 @@ async function saveApiKey(chatId, apiKeyText) {
       return { success: false, reason: 'duplicate_key', savedAt: savedAt };
     }
     
+    // БЕЗ updated_at!
     await executeQuery(
-      `INSERT INTO api_keys (chat_id, api_key, platform, created_at, updated_at) 
-       VALUES ($1, $2, $3, NOW(), NOW())`,
+      `INSERT INTO api_keys (chat_id, api_key, platform, created_at) 
+       VALUES ($1, $2, $3, NOW())`,
       [chatId, apiKeyText, 'api_key_saved']
     );
     
@@ -170,7 +168,7 @@ app.get('/health', async (req, res) => {
       status: 'ok', 
       bot: 'operational',
       database: 'connected',
-      version: '8.1',
+      version: '8.2',
       timestamp: new Date().toISOString()
     });
   } catch (error) {
@@ -178,7 +176,7 @@ app.get('/health', async (req, res) => {
       status: 'degraded', 
       bot: 'operational',
       database: 'disconnected',
-      version: '8.1',
+      version: '8.2',
       timestamp: new Date().toISOString()
     });
   }
@@ -384,7 +382,6 @@ async function startBot() {
     
   } catch (error) {
     console.error('❌ ОШИБКА ЗАПУСКА БОТА:', error.message);
-    console.error('❌ Полная ошибка:', error);
     
     // Пробуем перезапустить через 10 секунд
     console.log('🔄 Перезапуск через 10 секунд...');
