@@ -22,7 +22,8 @@ app.use(express.json());
 // ========== КЛАВИАТУРЫ ==========
 const mainMenu = Markup.keyboard([
   ['🔑 Отправить API-ключ'],
-  ['📊 Мой статус']
+  ['📊 Мой статус'],
+  ['🏠 Главное меню']
 ]).resize();
 
 const platformMenu = Markup.keyboard([
@@ -30,6 +31,10 @@ const platformMenu = Markup.keyboard([
   ['3. Google', '4. Others'],
   ['↩️ Назад']
 ]).resize();
+
+const supportButton = Markup.inlineKeyboard([
+  Markup.button.url('📞 Написать в поддержку', 'https://t.me/Seo_skayfol_analytics')
+]);
 
 const removeKeyboard = Markup.removeKeyboard();
 
@@ -68,18 +73,16 @@ app.get('/health', (req, res) => {
   res.json({ 
     status: 'ok', 
     bot: 'operational',
-    version: '2.1',
-    features: ['platform-selection', 'status-check']
+    version: '2.3',
+    features: ['platform-selection', 'status-check', 'inline-support']
   });
 });
 
 // ========== ХРАНЕНИЕ ВРЕМЕННЫХ ДАННЫХ ==========
 const userStates = new Map();
 
-// ========== КОМАНДА /start ==========
-bot.start(async (ctx) => {
-  console.log(`🚀 /start от ${ctx.chat.id} (${ctx.from.first_name})`);
-  
+// ========== КОМАНДА /start И КНОПКА ГЛАВНОГО МЕНЮ ==========
+async function showMainMenu(ctx) {
   await ctx.reply(
     `*🔐 Skayfol Analytics*\n\n` +
     `Добро пожаловать в систему аналитики рекламных кампаний!\n\n` +
@@ -87,12 +90,26 @@ bot.start(async (ctx) => {
     `✅ Принимает API-ключи от разных платформ\n` +
     `✅ Сохраняет в безопасное хранилище\n` +
     `✅ Уведомляет о результатах анализа\n\n` +
-    `Выберите действие:`,
+    `*Для связи с поддержкой:*\n` +
+    `Нажмите кнопку ниже 👇`,
     { 
       parse_mode: 'Markdown',
-      ...mainMenu 
+      ...supportButton
     }
   );
+  
+  // После inline-кнопки показываем основное меню
+  await ctx.reply('Выберите действие:', mainMenu);
+}
+
+bot.start(async (ctx) => {
+  console.log(`🚀 /start от ${ctx.chat.id} (${ctx.from.first_name})`);
+  await showMainMenu(ctx);
+});
+
+bot.hears('🏠 Главное меню', async (ctx) => {
+  console.log(`🔄 Главное меню от ${ctx.chat.id}`);
+  await showMainMenu(ctx);
 });
 
 // ========== КНОПКА: ОТПРАВИТЬ API-КЛЮЧ ==========
@@ -115,18 +132,30 @@ bot.hears('📊 Мой статус', async (ctx) => {
       `SELECT platform, COUNT(*) as count
        FROM api_keys 
        WHERE chat_id = $1
-       GROUP BY platform`,
+       GROUP BY platform
+       ORDER BY platform`,
       [ctx.chat.id]
     );
     
     let message = '*📊 Ваша статистика*\n\n';
     
     if (result.rows.length === 0) {
-      message += 'У вас пока нет сохранённых ключей.';
+      message += 'У вас пока нет сохранённых ключей.\nИспользуйте кнопку "🔑 Отправить API-ключ" чтобы добавить первый ключ.';
     } else {
+      const platformNames = {
+        'meta': 'Meta',
+        'tiktok': 'Tik Tok', 
+        'google': 'Google',
+        'others': 'Другие'
+      };
+      
       result.rows.forEach(row => {
-        message += `• ${row.platform}: ${row.count} ключей\n`;
+        const platformName = platformNames[row.platform] || row.platform;
+        message += `• ${platformName}: ${row.count} ключей\n`;
       });
+      
+      const total = result.rows.reduce((sum, row) => sum + parseInt(row.count), 0);
+      message += `\n*Всего: ${total} ключей*`;
     }
     
     await ctx.reply(
@@ -155,15 +184,26 @@ bot.hears(['1. Meta', '2. Tik Tok', '3. Google', '4. Others'], async (ctx) => {
   };
   
   const platform = platformMap[ctx.message.text];
+  const platformNames = {
+    'meta': 'Meta',
+    'tiktok': 'Tik Tok',
+    'google': 'Google',
+    'others': 'Другие платформы'
+  };
   
   // Сохраняем выбранную платформу для пользователя
-  userStates.set(ctx.chat.id, { platform, waitingForKey: true });
+  userStates.set(ctx.chat.id, { 
+    platform, 
+    platformDisplay: platformNames[platform],
+    waitingForKey: true 
+  });
   
   await ctx.reply(
-    `Выбрана платформа: *${ctx.message.text}*\n\n` +
+    `Выбрана платформа: *${platformNames[platform]}*\n\n` +
     `Теперь отправьте ваш API-ключ *одной строкой*.\n\n` +
     `*Пример формата:*\n` +
-    `\`sk_live_51Nt...\` или \`eyJhbGciOiJIUzI1NiIs...\`\n\n` +
+    `\`sk_test_51Nm...\` (тестовый ключ)\n` +
+    `\`eyJ0eXAiOiJKV1QiLCJhbGciOiJ...\` (JWT токен)\n\n` +
     `_Ключ должен быть длинным (от 30 символов)_`,
     { 
       parse_mode: 'Markdown',
@@ -190,9 +230,12 @@ bot.on('text', async (ctx) => {
   const chatId = ctx.chat.id;
   
   // Пропускаем команды и кнопки
-  if (text.startsWith('/') || 
-      ['🔑 Отправить API-ключ', '📊 Мой статус', 
-       '1. Meta', '2. Tik Tok', '3. Google', '4. Others', '↩️ Назад'].includes(text)) {
+  const menuItems = [
+    '🔑 Отправить API-ключ', '📊 Мой статус', '🏠 Главное меню',
+    '1. Meta', '2. Tik Tok', '3. Google', '4. Others', '↩️ Назад'
+  ];
+  
+  if (text.startsWith('/') || menuItems.includes(text)) {
     return;
   }
   
@@ -235,7 +278,7 @@ bot.on('text', async (ctx) => {
       
       await ctx.reply(
         `✅ *Ключ успешно сохранён!*\n\n` +
-        `Платформа: *${userState.platform}*\n` +
+        `Платформа: *${userState.platformDisplay}*\n` +
         `Мы начали обработку ваших данных.\n` +
         `Вы получите уведомление когда анализ будет готов.\n\n` +
         `_Обычно это занимает 5-15 минут_`,
@@ -286,7 +329,7 @@ async function startBot() {
     
     await bot.launch();
     botStarted = true;
-    console.log('✅ Бот запущен с выбором платформ');
+    console.log('✅ Бот запущен с inline-поддержкой');
     
   } catch (error: any) {
     if (error.message.includes('409')) {
@@ -302,7 +345,7 @@ async function startBot() {
 // ========== ЗАПУСК СЕРВЕРА ==========
 const server = app.listen(PORT, '0.0.0.0', () => {
   console.log(`🌐 Сервер на порту ${PORT}`);
-  console.log(`🤖 Версия: 2.2 (выбор платформ)`);
+  console.log(`🤖 Версия: 2.3 (inline-поддержка)`);
   
   setTimeout(startBot, 1000);
 });
