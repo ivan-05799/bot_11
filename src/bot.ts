@@ -15,8 +15,6 @@ if (!BOT_TOKEN || !DB_URL) {
   process.exit(1);
 }
 
-console.log('🤖 Инициализация бота...');
-
 const bot = new Telegraf(BOT_TOKEN);
 const app = express();
 app.use(express.json());
@@ -24,123 +22,29 @@ app.use(express.json());
 // ========== КЛАВИАТУРЫ ==========
 const mainMenu = Markup.keyboard([
   ['🔑 Отправить API-ключ'],
-  ['📊 Мой статус', '🆘 Помощь'],
-  ['📞 Связаться с поддержкой'],
-  ['🎫 Оформить подписку на 30 дней']
+  ['📊 Мой статус']
 ]).resize();
 
-const adminMenu = Markup.keyboard([
-  ['🔑 Отправить API-ключ'],
-  ['📊 Мой статус', '🆘 Помощь'],
-  ['📞 Связаться с поддержкой'],
-  ['🎫 Оформить подписку на 30 дней'],
-  ['⚡ Активировать подписку']
+const platformMenu = Markup.keyboard([
+  ['1. Meta', '2. Tik Tok'],
+  ['3. Google', '4. Others'],
+  ['↩️ Назад']
 ]).resize();
 
 const removeKeyboard = Markup.removeKeyboard();
 
 // ========== ПОДКЛЮЧЕНИЕ К БД ==========
-async function getDbConnection(retries = 3, delay = 2000) {
-  for (let i = 0; i < retries; i++) {
-    try {
-      const db = new Client({ 
-        connectionString: DB_URL,
-        ssl: { rejectUnauthorized: false }
-      });
-      
-      await db.connect();
-      return db;
-      
-    } catch (error) {
-      console.error(`❌ Ошибка подключения к БД (попытка ${i + 1}/${retries}):`, error.message);
-      
-      if (i < retries - 1) {
-        await new Promise(resolve => setTimeout(resolve, delay));
-      } else {
-        throw error;
-      }
-    }
-  }
+async function getDbConnection() {
+  const db = new Client({ 
+    connectionString: DB_URL,
+    connectionTimeoutMillis: 10000
+  });
+  await db.connect();
+  return db;
 }
 
-async function executeQuery(query, params = []) {
-  let db;
-  try {
-    db = await getDbConnection();
-    const result = await db.query(query, params);
-    return result;
-  } catch (error) {
-    console.error('❌ Ошибка выполнения запроса:', error.message);
-    throw error;
-  } finally {
-    if (db) {
-      try {
-        await db.end();
-      } catch (error) {
-        // Игнорируем
-      }
-    }
-  }
-}
-
-// ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
-
-async function saveApiKey(chatId, apiKeyText) {
-  try {
-    const duplicateCheck = await executeQuery(
-      `SELECT created_at FROM api_keys WHERE chat_id = $1 AND api_key = $2`,
-      [chatId, apiKeyText]
-    );
-    
-    if (duplicateCheck.rows.length > 0) {
-      const savedAt = new Date(duplicateCheck.rows[0].created_at).toLocaleString('ru-RU');
-      return { success: false, reason: 'duplicate_key', savedAt: savedAt };
-    }
-    
-    // БЕЗ updated_at!
-    await executeQuery(
-      `INSERT INTO api_keys (chat_id, api_key, platform, created_at) 
-       VALUES ($1, $2, $3, NOW())`,
-      [chatId, apiKeyText, 'api_key_saved']
-    );
-    
-    console.log(`✅ Ключ сохранен: ${chatId}`);
-    return { success: true };
-    
-  } catch (error) {
-    console.error('❌ Ошибка сохранения ключа:', error.message);
-    return { success: false, error: error.message };
-  }
-}
-
-async function getUserStats(chatId) {
-  try {
-    const result = await executeQuery(
-      `SELECT COUNT(*) as total_keys, MAX(created_at) as last_key_added
-       FROM api_keys WHERE chat_id = $1 AND api_key IS NOT NULL`,
-      [chatId]
-    );
-    
-    return {
-      totalKeys: result.rows[0].total_keys || 0,
-      lastKeyAdded: result.rows[0].last_key_added 
-        ? new Date(result.rows[0].last_key_added).toLocaleString('ru-RU')
-        : 'ещё нет'
-    };
-  } catch (error) {
-    console.error('❌ Ошибка получения статистики:', error.message);
-    return { totalKeys: 0, lastKeyAdded: 'ошибка' };
-  }
-}
-
-function isAdmin(chatId) {
-  const adminIds = [7909570066];
-  return adminIds.includes(chatId);
-}
-
-// ========== API ЭНДПОИНТЫ ==========
+// ========== WEBHOOK ДЛЯ ЗАКАЗЧИКА ==========
 app.post('/api/send-message', async (req, res) => {
-  console.log('📨 Получен запрос на отправку сообщения');
   try {
     const { chat_id, message } = req.body;
     
@@ -154,256 +58,264 @@ app.post('/api/send-message', async (req, res) => {
     });
     res.json({ success: true });
     
-  } catch (error) {
+  } catch (error: any) {
     console.error('❌ [WEBHOOK] Ошибка:', error.message);
     res.status(500).json({ error: 'Ошибка отправки' });
   }
 });
 
-app.get('/health', async (req, res) => {
-  console.log('🏥 Health check');
-  try {
-    await executeQuery('SELECT 1 as status');
-    res.json({ 
-      status: 'ok', 
-      bot: 'operational',
-      database: 'connected',
-      version: '8.2',
-      timestamp: new Date().toISOString()
-    });
-  } catch (error) {
-    res.json({ 
-      status: 'degraded', 
-      bot: 'operational',
-      database: 'disconnected',
-      version: '8.2',
-      timestamp: new Date().toISOString()
-    });
-  }
+app.get('/health', (req, res) => {
+  res.json({ 
+    status: 'ok', 
+    bot: 'operational',
+    version: '2.1',
+    features: ['platform-selection', 'status-check']
+  });
 });
 
-// ========== ОБРАБОТЧИКИ КОМАНД ==========
+// ========== ХРАНЕНИЕ ВРЕМЕННЫХ ДАННЫХ ==========
+const userStates = new Map();
 
-// 1. Старт
+// ========== КОМАНДА /start ==========
 bot.start(async (ctx) => {
-  const chatId = ctx.chat.id;
-  const firstName = ctx.from.first_name || '';
-  
-  console.log(`🚀 /start от ${chatId} (${firstName})`);
-  
-  const greeting = firstName ? `, ${firstName}!` : '!';
-  const menuToShow = isAdmin(chatId) ? adminMenu : mainMenu;
-  const adminNote = isAdmin(chatId) ? '\n\n👑 Вы администратор' : '';
+  console.log(`🚀 /start от ${ctx.chat.id} (${ctx.from.first_name})`);
   
   await ctx.reply(
-    `🔐 Skayfol Analytics\n\n` +
-    `Добро пожаловать${greeting}\n\n` +
-    `✅ Тестовый режим активен` +
-    `${adminNote}\n\n` +
+    `*🔐 Skayfol Analytics*\n\n` +
+    `Добро пожаловать в систему аналитики рекламных кампаний!\n\n` +
+    `*Что умеет бот:*\n` +
+    `✅ Принимает API-ключи от разных платформ\n` +
+    `✅ Сохраняет в безопасное хранилище\n` +
+    `✅ Уведомляет о результатах анализа\n\n` +
     `Выберите действие:`,
-    { ...menuToShow }
+    { 
+      parse_mode: 'Markdown',
+      ...mainMenu 
+    }
   );
 });
 
-// 2. Отправить API-ключ
+// ========== КНОПКА: ОТПРАВИТЬ API-КЛЮЧ ==========
 bot.hears('🔑 Отправить API-ключ', async (ctx) => {
-  console.log(`🔘 Нажата кнопка "Отправить API-ключ" от ${ctx.chat.id}`);
   await ctx.reply(
-    'Отправьте API-ключ одной строкой (от 30 символов):\n\n' +
-    '✅ ТЕСТОВЫЙ РЕЖИМ: Ключи принимаются без ограничений',
-    { ...removeKeyboard }
+    'Выберите платформу для которой добавляете API-ключ:',
+    { 
+      parse_mode: 'Markdown',
+      ...platformMenu 
+    }
   );
 });
 
-// 3. Мой статус
+// ========== КНОПКА: МОЙ СТАТУС ==========
 bot.hears('📊 Мой статус', async (ctx) => {
-  const chatId = ctx.chat.id;
-  const firstName = ctx.from.first_name || '';
-  
-  console.log(`🔘 Нажата кнопка "Мой статус" от ${chatId}`);
-  
+  let db;
   try {
-    const stats = await getUserStats(chatId);
+    db = await getDbConnection();
+    const result = await db.query(
+      `SELECT platform, COUNT(*) as count
+       FROM api_keys 
+       WHERE chat_id = $1
+       GROUP BY platform`,
+      [ctx.chat.id]
+    );
     
-    let msg = `📊 Ваша статистика${firstName ? ', ' + firstName : ''}\n\n`;
-    msg += `👤 Telegram ID: ${chatId}\n`;
-    msg += `🔑 Ключей сохранено: ${stats.totalKeys}\n`;
-    msg += `⏰ Последний ключ: ${stats.lastKeyAdded}\n\n`;
-    msg += `⚙️ Режим работы: Тестовый`;
+    let message = '*📊 Ваша статистика*\n\n';
     
-    await ctx.reply(msg, { ...(isAdmin(chatId) ? adminMenu : mainMenu) });
+    if (result.rows.length === 0) {
+      message += 'У вас пока нет сохранённых ключей.';
+    } else {
+      result.rows.forEach(row => {
+        message += `• ${row.platform}: ${row.count} ключей\n`;
+      });
+    }
+    
+    await ctx.reply(
+      message,
+      { 
+        parse_mode: 'Markdown',
+        ...mainMenu 
+      }
+    );
+    
   } catch (error) {
-    await ctx.reply('⚠️ Ошибка получения статуса', mainMenu);
+    console.error('❌ Ошибка получения статуса:', error);
+    await ctx.reply('⚠️ Не удалось получить статистику', mainMenu);
+  } finally {
+    if (db) await db.end();
   }
 });
 
-// 4. Помощь
-bot.hears('🆘 Помощь', async (ctx) => {
-  console.log(`🔘 Нажата кнопка "Помощь" от ${ctx.chat.id}`);
-  await ctx.reply(
-    `❓ Помощь\n\n` +
-    `🔹 Как отправить API-ключ?\n` +
-    `Нажмите "🔑 Отправить API-ключ" и отправьте ключ\n\n` +
-    `🔹 Как оформить подписку?\n` +
-    `Нажмите "🎫 Оформить подписку на 30 дней"\n\n` +
-    `🔹 Контакты поддержки:\n` +
-    `📧 support@skayfol.com\n` +
-    `🌐 https://skayfol.com`,
-    { ...(isAdmin(ctx.chat.id) ? adminMenu : mainMenu) }
-  );
-});
-
-// 5. Связаться с поддержкой
-bot.hears('📞 Связаться с поддержкой', async (ctx) => {
-  console.log(`🔘 Нажата кнопка "Связаться с поддержкой" от ${ctx.chat.id}`);
-  await ctx.reply(
-    `📞 Контакты поддержки\n\n` +
-    `📧 Email: support@skayfol.com\n` +
-    `🌐 Сайт: https://skayfol.com\n` +
-    `⏰ Часы работы: 9:00-18:00 (МСК)\n\n` +
-    `Ответ в течение 24 часов`,
-    { ...(isAdmin(ctx.chat.id) ? adminMenu : mainMenu) }
-  );
-});
-
-// 6. Оформить подписку на 30 дней
-bot.hears('🎫 Оформить подписку на 30 дней', async (ctx) => {
-  console.log(`🔘 Нажата кнопка "Оформить подписку" от ${ctx.chat.id}`);
-  await ctx.reply(
-    `🎫 Оформление подписки на 30 дней\n\n` +
-    `Стоимость: 3000 руб.\n` +
-    `Срок действия: 30 дней\n\n` +
-    `Для оформления подписки:\n` +
-    `1. Оплатите 3000 руб.\n` +
-    `2. Отправьте скриншот оплаты в поддержку\n` +
-    `3. Мы активируем подписку в течение 24 часов\n\n` +
-    `📞 Контакты поддержки:\n` +
-    `📧 Email: support@skayfol.com\n` +
-    `🌐 Сайт: https://skayfol.com`,
-    { ...(isAdmin(ctx.chat.id) ? adminMenu : mainMenu) }
-  );
-});
-
-// 7. Активировать подписку (админ)
-bot.hears('⚡ Активировать подписку', async (ctx) => {
-  const chatId = ctx.chat.id;
-  console.log(`🔘 Нажата кнопка "Активировать подписку" от ${chatId}`);
+// ========== ВЫБОР ПЛАТФОРМЫ ==========
+bot.hears(['1. Meta', '2. Tik Tok', '3. Google', '4. Others'], async (ctx) => {
+  const platformMap = {
+    '1. Meta': 'meta',
+    '2. Tik Tok': 'tiktok', 
+    '3. Google': 'google',
+    '4. Others': 'others'
+  };
   
-  if (!isAdmin(chatId)) {
-    await ctx.reply('❌ Доступ только для администраторов', mainMenu);
-    return;
-  }
+  const platform = platformMap[ctx.message.text];
+  
+  // Сохраняем выбранную платформу для пользователя
+  userStates.set(ctx.chat.id, { platform, waitingForKey: true });
   
   await ctx.reply(
-    'Введите Telegram ID для активации подписки на 30 дней:',
-    { ...removeKeyboard }
+    `Выбрана платформа: *${ctx.message.text}*\n\n` +
+    `Теперь отправьте ваш API-ключ *одной строкой*.\n\n` +
+    `*Пример формата:*\n` +
+    `\`sk_live_51Nt...\` или \`eyJhbGciOiJIUzI1NiIs...\`\n\n` +
+    `_Ключ должен быть длинным (от 30 символов)_`,
+    { 
+      parse_mode: 'Markdown',
+      ...removeKeyboard 
+    }
   );
-  ctx.session = { action: 'activate_subscription' };
 });
 
-// ========== ОБРАБОТКА ТЕКСТА ==========
+// ========== КНОПКА НАЗАД ==========
+bot.hears('↩️ Назад', async (ctx) => {
+  userStates.delete(ctx.chat.id);
+  await ctx.reply(
+    'Выберите действие:',
+    { 
+      parse_mode: 'Markdown',
+      ...mainMenu 
+    }
+  );
+});
+
+// ========== ОБРАБОТКА API-КЛЮЧЕЙ С ПЛАТФОРМОЙ ==========
 bot.on('text', async (ctx) => {
   const text = ctx.message.text;
   const chatId = ctx.chat.id;
   
-  console.log(`📨 Текст от ${chatId}: "${text}"`);
-  
-  // Пропускаем команды
-  if (text.startsWith('/')) return;
-  
-  // Обработка активации подписки
-  if (ctx.session?.action === 'activate_subscription') {
-    const targetChatId = parseInt(text);
-    
-    if (isNaN(targetChatId)) {
-      await ctx.reply('❌ Некорректный ID', adminMenu);
-      return;
-    }
-    
-    await ctx.reply(`✅ Подписка для ${targetChatId} будет активирована`, adminMenu);
-    delete ctx.session.action;
+  // Пропускаем команды и кнопки
+  if (text.startsWith('/') || 
+      ['🔑 Отправить API-ключ', '📊 Мой статус', 
+       '1. Meta', '2. Tik Tok', '3. Google', '4. Others', '↩️ Назад'].includes(text)) {
     return;
   }
   
-  // Проверка API-ключа
-  if (text.length > 25 && /[a-zA-Z0-9._-]{25,}/.test(text)) {
-    console.log(`🔑 API-ключ от ${chatId}`);
-    
-    const result = await saveApiKey(chatId, text);
-    
-    if (result.success) {
-      await ctx.reply(`✅ Ключ сохранен! Анализ данных начат.`, 
-        { ...(isAdmin(chatId) ? adminMenu : mainMenu) });
-    } else if (result.reason === 'duplicate_key') {
-      await ctx.reply(`⚠️ Этот ключ уже сохранен (${result.savedAt})`, 
-        { ...(isAdmin(chatId) ? adminMenu : mainMenu) });
-    } else {
-      await ctx.reply(`❌ Ошибка сохранения: ${result.error}`, 
-        { ...(isAdmin(chatId) ? adminMenu : mainMenu) });
-    }
-    return;
-  }
+  const userState = userStates.get(chatId);
   
-  // Для всего остального - показываем меню
-  await ctx.reply(`Используйте кнопки меню.`, 
-    { ...(isAdmin(chatId) ? adminMenu : mainMenu) });
+  // Проверяем похоже ли на API-ключ и есть ли выбранная платформа
+  if (text.length > 25 && /[a-zA-Z0-9._-]{25,}/.test(text) && userState?.waitingForKey) {
+    console.log(`🔑 Попытка сохранения ключа от ${chatId} для платформы ${userState.platform}`);
+    
+    let db;
+    try {
+      db = await getDbConnection();
+      
+      // Проверка дубликата
+      const exists = await db.query(
+        'SELECT id, created_at FROM api_keys WHERE chat_id = $1 AND api_key = $2',
+        [chatId, text]
+      );
+      
+      if (exists.rows.length > 0) {
+        const savedAt = new Date(exists.rows[0].created_at).toLocaleString('ru-RU');
+        await ctx.reply(
+          `⚠️ *Этот ключ уже был сохранён!*\n\n` +
+          `_Дата сохранения: ${savedAt}_\n\n` +
+          `Выберите действие:`,
+          { 
+            parse_mode: 'Markdown',
+            ...mainMenu 
+          }
+        );
+        userStates.delete(chatId);
+        return;
+      }
+      
+      // Сохранение нового ключа с платформой
+      await db.query(
+        'INSERT INTO api_keys (chat_id, api_key, platform) VALUES ($1, $2, $3)',
+        [chatId, text, userState.platform]
+      );
+      
+      await ctx.reply(
+        `✅ *Ключ успешно сохранён!*\n\n` +
+        `Платформа: *${userState.platform}*\n` +
+        `Мы начали обработку ваших данных.\n` +
+        `Вы получите уведомление когда анализ будет готов.\n\n` +
+        `_Обычно это занимает 5-15 минут_`,
+        { 
+          parse_mode: 'Markdown',
+          ...mainMenu 
+        }
+      );
+      
+      console.log(`✅ Ключ от ${chatId} сохранён для платформы ${userState.platform}`);
+      
+    } catch (error) {
+      console.error('❌ Ошибка БД:', error);
+      await ctx.reply(
+        '⚠️ *Ошибка сервера*\n\nПожалуйста, попробуйте позже.',
+        { 
+          parse_mode: 'Markdown',
+          ...mainMenu 
+        }
+      );
+    } finally {
+      userStates.delete(chatId);
+      if (db) await db.end();
+    }
+  } else if (userState?.waitingForKey) {
+    // Пользователь ввёл не ключ, а что-то другое
+    await ctx.reply(
+      'Это не похоже на API-ключ. Отправьте длинную строку (от 30 символов).',
+      removeKeyboard
+    );
+  } else {
+    // Не похоже на ключ и нет активного состояния - показываем меню
+    await ctx.reply(
+      'Пожалуйста, используйте кнопки меню.',
+      mainMenu
+    );
+  }
 });
 
-// ========== ИНИЦИАЛИЗАЦИЯ СЕССИЙ ==========
-bot.use((ctx, next) => {
-  if (!ctx.session) ctx.session = {};
-  return next();
-});
+// ========== ЗАПУСК СИСТЕМЫ ==========
+let botStarted = false;
 
-// ========== ЗАПУСК ==========
 async function startBot() {
   try {
-    console.log('🔄 Запуск бота...');
+    // Очищаем старые webhook
+    await bot.telegram.deleteWebhook();
+    console.log('✅ Очищены старые webhook');
     
-    // Очищаем webhook
-    await bot.telegram.deleteWebhook({ drop_pending_updates: true });
-    console.log('✅ Webhook очищен');
-    
-    // Получаем информацию о боте
-    const botInfo = await bot.telegram.getMe();
-    console.log(`🤖 Бот: @${botInfo.username} (${botInfo.first_name})`);
-    
-    // Запускаем
     await bot.launch();
-    console.log('✅ Бот запущен в режиме polling');
+    botStarted = true;
+    console.log('✅ Бот запущен с выбором платформ');
     
-    // Проверяем подключение к БД
-    try {
-      await executeQuery('SELECT 1 as status');
-      console.log('✅ База данных подключена');
-    } catch (error) {
-      console.log('⚠️ База данных недоступна, но бот работает');
+  } catch (error: any) {
+    if (error.message.includes('409')) {
+      console.log('⚠️ Конфликт 409 - временно, вебхук работает');
+      botStarted = false;
+    } else {
+      console.error('❌ Ошибка запуска:', error);
+      throw error;
     }
-    
-  } catch (error) {
-    console.error('❌ ОШИБКА ЗАПУСКА БОТА:', error.message);
-    
-    // Пробуем перезапустить через 10 секунд
-    console.log('🔄 Перезапуск через 10 секунд...');
-    setTimeout(startBot, 10000);
   }
 }
 
+// ========== ЗАПУСК СЕРВЕРА ==========
 const server = app.listen(PORT, '0.0.0.0', () => {
-  console.log(`🌐 Сервер запущен на порту ${PORT}`);
-  console.log(`🔗 URL: https://bot-11-2.onrender.com`);
-  console.log(`📊 API: /api/send-message, /health`);
+  console.log(`🌐 Сервер на порту ${PORT}`);
+  console.log(`🤖 Версия: 2.2 (выбор платформ)`);
   
-  // Запускаем бота через 3 секунды
-  setTimeout(startBot, 3000);
+  setTimeout(startBot, 1000);
+});
+
+server.on('error', (error: any) => {
+  console.error('❌ Ошибка сервера:', error.message);
+  process.exit(1);
 });
 
 // Graceful shutdown
 process.on('SIGTERM', () => {
   console.log('🛑 Завершение работы...');
-  bot.stop();
-  server.close();
   process.exit(0);
 });
 
-console.log('🚀 Приложение инициализировано');
+console.log('🚀 Система инициализирована');
