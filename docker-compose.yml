@@ -1,0 +1,24 @@
+version: '3.8'
+
+services:
+  # ТОЛЬКО наша БД для управления доступом
+  our-db:
+    image: postgres:15-alpine
+    container_name: skayfol-access-db
+    environment:
+      POSTGRES_USER: skayfol_admin
+      POSTGRES_PASSWORD: secure_password_here
+      POSTGRES_DB: skayfol_access
+    ports:
+      - "5433:5432"
+    volumes:
+      - our_postgres_data:/var/lib/postgresql/data
+      - ./our_schema.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U skayfol_admin"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  our_postgres_data:
