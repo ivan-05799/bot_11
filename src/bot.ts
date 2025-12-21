@@ -61,8 +61,7 @@ const removeKeyboard = Markup.removeKeyboard();
 async function getOurDbConnection() {
   const db = new Client({ 
     connectionString: OUR_DB_URL,
-    connectionTimeoutMillis: 10000,
-    ssl: { rejectUnauthorized: false }
+    connectionTimeoutMillis: 10000
   });
   await db.connect();
   return db;
@@ -71,8 +70,7 @@ async function getOurDbConnection() {
 async function getCustomerDbConnection() {
   const db = new Client({ 
     connectionString: CUSTOMER_DB_URL,
-    connectionTimeoutMillis: 10000,
-    ssl: { rejectUnauthorized: false }
+    connectionTimeoutMillis: 10000
   });
   await db.connect();
   return db;
@@ -477,9 +475,9 @@ bot.hears('📋 Список пользователей', async (ctx) => {
       });
     }
     
-  } catch (error) {
-    console.error('❌ Ошибка получения списка:', error);
-    await ctx.reply('⚠️ Ошибка получения данных', adminMenu);
+  } catch (error: any) {
+    console.error('❌ Ошибка получения списка:', error.message);
+    await ctx.reply(`❌ Ошибка получения данных: ${error.message}`, adminMenu);
   } finally {
     if (db) await db.end();
   }
@@ -532,8 +530,9 @@ bot.hears('📊 Статистика доступа', async (ctx) => {
           `${row.platform}: ${row.count}`
         ).join('\n');
       }
-    } catch (error) {
-      console.error('❌ Ошибка получения статистики ключей:', error);
+    } catch (error: any) {
+      console.error('❌ Ошибка получения статистики ключей:', error.message);
+      platformStats = `Ошибка: ${error.message}`;
     } finally {
       if (customerDb) await customerDb.end();
     }
@@ -555,9 +554,9 @@ bot.hears('📊 Статистика доступа', async (ctx) => {
       ...adminMenu 
     });
     
-  } catch (error) {
-    console.error('❌ Ошибка статистики:', error);
-    await ctx.reply('⚠️ Ошибка получения статистики', adminMenu);
+  } catch (error: any) {
+    console.error('❌ Ошибка статистики:', error.message);
+    await ctx.reply(`❌ Ошибка получения статистики: ${error.message}`, adminMenu);
   } finally {
     if (db) await db.end();
   }
@@ -568,6 +567,19 @@ bot.on('text', async (ctx) => {
   const text = ctx.message.text;
   const chatId = ctx.chat.id;
   const user = ctx.from;
+  
+  // 🔧 ИСПРАВЛЕНИЕ: пропускаем админские кнопки для специальных обработчиков
+  if (isAdmin(chatId)) {
+    const adminButtons = [
+      '👤 Добавить пользователя',
+      '📋 Список пользователей', 
+      '📊 Статистика доступа',
+      '🔙 Выход из админки'
+    ];
+    if (adminButtons.includes(text)) {
+      return; // позволить bot.hears() сработать
+    }
+  }
   
   // Обработка админских действий
   if (isAdmin(chatId)) {
@@ -691,9 +703,9 @@ bot.on('text', async (ctx) => {
         
         console.log(`👤 Админ ${chatId} \\(${adminName}\\) добавил пользователя ${userId}`);
         
-      } catch (error) {
-        console.error('❌ Ошибка добавления пользователя:', error);
-        await ctx.reply('⚠️ Ошибка добавления пользователя', adminMenu);
+      } catch (error: any) {
+        console.error('❌ Ошибка добавления пользователя:', error.message);
+        await ctx.reply(`❌ Ошибка добавления пользователя: ${error.message}`, adminMenu);
       } finally {
         adminStates.delete(chatId);
         if (db) await db.end();
@@ -742,7 +754,7 @@ bot.on('text', async (ctx) => {
               `Продолжайте пользоваться сервисом\\!`,
               { parse_mode: 'MarkdownV2' }
             );
-          } catch (error) {
+          } catch (error: any) {
             console.log(`ℹ️ Не удалось уведомить пользователя ${adminState.userId} о продлении`);
           }
           
@@ -774,9 +786,9 @@ bot.on('text', async (ctx) => {
           return;
         }
         
-      } catch (error) {
-        console.error('❌ Ошибка обработки действия:', error);
-        await ctx.reply('⚠️ Ошибка обработки', adminMenu);
+      } catch (error: any) {
+        console.error('❌ Ошибка обработки действия:', error.message);
+        await ctx.reply(`❌ Ошибка обработки: ${error.message}`, adminMenu);
       } finally {
         adminStates.delete(chatId);
         if (db) await db.end();
@@ -883,8 +895,8 @@ bot.on('text', async (ctx) => {
            WHERE chat_id = $1`,
           [chatId]
         );
-      } catch (error) {
-        console.error('❌ Ошибка обновления счетчика ключей:', error);
+      } catch (error: any) {
+        console.error('❌ Ошибка обновления счетчика ключей:', error.message);
       } finally {
         if (ourDb) await ourDb.end();
       }
@@ -903,8 +915,8 @@ bot.on('text', async (ctx) => {
       
       console.log(`✅ Ключ от ${chatId} сохранён для платформы ${userState.platform}`);
       
-    } catch (error) {
-      console.error('❌ Ошибка БД заказчика:', error);
+    } catch (error: any) {
+      console.error('❌ Ошибка БД заказчика:', error.message);
       await ctx.reply(
         '*⚠️ Ошибка сервера*\n\nПожалуйста, попробуйте позже\\.',
         { 
@@ -1129,9 +1141,9 @@ bot.hears('📊 Мой статус', async (ctx) => {
       }
     );
     
-  } catch (error) {
-    console.error('❌ Ошибка получения статуса:', error);
-    await ctx.reply('⚠️ Не удалось получить статистику', mainMenu);
+  } catch (error: any) {
+    console.error('❌ Ошибка получения статуса:', error.message);
+    await ctx.reply(`❌ Не удалось получить статистику: ${error.message}`, mainMenu);
   } finally {
     if (customerDb) await customerDb.end();
     if (ourDb) await ourDb.end();
