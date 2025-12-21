@@ -83,7 +83,21 @@ function isAdmin(chatId: number | string): boolean {
   return ADMIN_CHAT_IDS.includes(chatId.toString());
 }
 
+function escapeMarkdown(text: string): string {
+  return text.replace(/[_*[\]()~`>#+\-=|{}.!]/g, '\\$&');
+}
+
 async function checkUserAccess(chatId: number): Promise<{hasAccess: boolean, daysLeft: number, expiresAt: Date | null, isActive: boolean}> {
+  // АДМИНЫ ВСЕГДА ИМЕЮТ ДОСТУП
+  if (isAdmin(chatId)) {
+    return { 
+      hasAccess: true, 
+      daysLeft: 999, 
+      expiresAt: null, 
+      isActive: true 
+    };
+  }
+  
   let db;
   try {
     db = await getOurDbConnection();
@@ -190,8 +204,8 @@ async function checkExpiringSubscriptions() {
       try {
         await bot.telegram.sendMessage(
           row.chat_id,
-          `⚠️ *Внимание!*\n\nВаша подписка истекает через 3 дня.\nДля продления обратитесь к администратору.`,
-          { parse_mode: 'Markdown' }
+          `⚠️ *Внимание\\!*\n\nВаша подписка истекает через 3 дня\\.\nДля продления обратитесь к администратору\\.`,
+          { parse_mode: 'MarkdownV2' }
         );
         
         await db.query(
@@ -199,7 +213,7 @@ async function checkExpiringSubscriptions() {
           [row.chat_id]
         );
         
-        console.log(`📢 Отправлено уведомление (3 дня) пользователю ${row.chat_id}`);
+        console.log(`📢 Отправлено уведомление \\(3 дня\\) пользователю ${row.chat_id}`);
       } catch (error: any) {
         console.error(`❌ Ошибка отправки уведомления пользователю ${row.chat_id}:`, error.message);
       }
@@ -223,8 +237,8 @@ async function checkExpiringSubscriptions() {
       try {
         await bot.telegram.sendMessage(
           row.chat_id,
-          `🚨 *Срочное уведомление!*\n\nВаша подписка истекает ЗАВТРА!\nСрочно обратитесь к администратору для продления.`,
-          { parse_mode: 'Markdown' }
+          `🚨 *Срочное уведомление\\!*\n\nВаша подписка истекает ЗАВТРА\\!\nСрочно обратитесь к администратору для продления\\.`,
+          { parse_mode: 'MarkdownV2' }
         );
         
         await db.query(
@@ -232,13 +246,13 @@ async function checkExpiringSubscriptions() {
           [row.chat_id]
         );
         
-        console.log(`📢 Отправлено уведомление (1 день) пользователю ${row.chat_id}`);
+        console.log(`📢 Отправлено уведомление \\(1 день\\) пользователю ${row.chat_id}`);
       } catch (error: any) {
         console.error(`❌ Ошибка отправки уведомления пользователю ${row.chat_id}:`, error.message);
       }
     }
     
-    console.log(`✅ Проверка завершена. Найдено: ${threeDaysResult.rows.length + oneDayResult.rows.length} подписок`);
+    console.log(`✅ Проверка завершена\\. Найдено: ${threeDaysResult.rows.length + oneDayResult.rows.length} подписок`);
     
   } catch (error) {
     console.error('❌ Ошибка проверки подписок:', error);
@@ -257,7 +271,6 @@ app.post('/api/send-message', async (req, res) => {
     }
 
     await bot.telegram.sendMessage(chat_id, message, { 
-      parse_mode: 'Markdown',
       ...mainMenu 
     });
     res.json({ success: true });
@@ -292,18 +305,17 @@ bot.start(async (ctx) => {
   // Обновляем кэш пользователя
   await updateUserCache(chatId, user);
   
-  // Проверяем доступ
-  const { hasAccess, daysLeft } = await checkUserAccess(chatId);
-  
   // Если пользователь - админ, показываем админку
   if (isAdmin(chatId)) {
     const adminName = user.username ? `@${user.username}` : user.first_name;
+    const escapedName = escapeMarkdown(adminName);
+    
     await ctx.reply(
       `👑 *Панель администратора*\n\n` +
-      `Добро пожаловать, администратор ${adminName}!\n` +
+      `Добро пожаловать, администратор ${escapedName}\\!\n` +
       `Выберите действие:`,
       { 
-        parse_mode: 'Markdown',
+        parse_mode: 'MarkdownV2',
         ...adminMenu 
       }
     );
@@ -311,15 +323,17 @@ bot.start(async (ctx) => {
   }
   
   // Проверяем доступ для обычных пользователей
+  const { hasAccess, daysLeft } = await checkUserAccess(chatId);
+  
   if (!hasAccess) {
     await ctx.reply(
       `❌ *Доступ запрещен*\n\n` +
-      `У вас нет активной подписки.\n` +
-      `Для получения доступа обратитесь к администратору.\n\n` +
+      `У вас нет активной подписки\\.\n` +
+      `Для получения доступа обратитесь к администратору\\.\n\n` +
       `Ваш ID для предоставления доступа: \`${chatId}\`\n\n` +
-      `📞 Контакт: @Seo_skayfol_analytics`,
+      `📞 Контакт: @Seo\\_skayfol\\_analytics`,
       { 
-        parse_mode: 'Markdown',
+        parse_mode: 'MarkdownV2',
         ...removeKeyboard 
       }
     );
@@ -332,8 +346,8 @@ bot.start(async (ctx) => {
 
 // ========== КОМАНДА /myid ==========
 bot.command('myid', async (ctx) => {
-  await ctx.reply(`Ваш chat_id: \`${ctx.chat.id}\``, { 
-    parse_mode: 'Markdown',
+  await ctx.reply(`Ваш chat\\_id: \`${ctx.chat.id}\``, { 
+    parse_mode: 'MarkdownV2',
     ...removeKeyboard 
   });
 });
@@ -343,20 +357,21 @@ bot.command('admin', async (ctx) => {
   const chatId = ctx.chat.id;
   
   if (!isAdmin(chatId)) {
-    await ctx.reply('❌ У вас нет прав администратора.', mainMenu);
+    await ctx.reply('❌ У вас нет прав администратора\\.', { parse_mode: 'MarkdownV2', ...mainMenu });
     return;
   }
   
   adminStates.delete(chatId);
   const user = ctx.from;
   const adminName = user.username ? `@${user.username}` : user.first_name;
+  const escapedName = escapeMarkdown(adminName);
   
   await ctx.reply(
     `👑 *Панель администратора*\n\n` +
-    `Приветствую, ${adminName}!\n` +
+    `Приветствую, ${escapedName}\\!\n` +
     `Выберите действие:`,
     { 
-      parse_mode: 'Markdown',
+      parse_mode: 'MarkdownV2',
       ...adminMenu 
     }
   );
@@ -378,12 +393,12 @@ bot.hears('👤 Добавить пользователя', async (ctx) => {
   adminStates.set(chatId, { action: 'add_user', step: 'waiting_id' });
   
   await ctx.reply(
-    `👤 *Добавление пользователя*\n\n` +
-    `Отправьте chat_id пользователя, которому нужно предоставить доступ.\n\n` +
-    `*Формат:* Только цифры (например: 1234567890)\n` +
+    `*Добавление пользователя*\n\n` +
+    `Отправьте chat\\_id пользователя, которому нужно предоставить доступ\\.\n\n` +
+    `*Формат:* Только цифры \\(например: 1234567890\\)\n` +
     `*Доступ предоставляется на 30 дней*`,
     { 
-      parse_mode: 'Markdown',
+      parse_mode: 'MarkdownV2',
       ...removeKeyboard 
     }
   );
@@ -419,10 +434,10 @@ bot.hears('📋 Список пользователей', async (ctx) => {
       []
     );
     
-    let message = `📋 *Список пользователей* (последние 50)\n\n`;
+    let message = `*📋 Список пользователей \\(последние 50\\)*\n\n`;
     
     if (result.rows.length === 0) {
-      message += `Нет пользователей с доступом.`;
+      message += `Нет пользователей с доступом\\.`;
     } else {
       result.rows.forEach((row, index) => {
         const grantedDate = new Date(row.granted_at).toLocaleDateString('ru-RU');
@@ -431,15 +446,16 @@ bot.hears('📋 Список пользователей', async (ctx) => {
         const expiresAt = new Date(row.expires_at);
         const daysLeft = Math.max(0, Math.ceil((expiresAt.getTime() - now.getTime()) / (1000 * 3600 * 24)));
         
-        const userName = row.first_name || row.username || 'Неизвестно';
+        const userName = escapeMarkdown(row.first_name || row.username || 'Неизвестно');
+        const notes = row.notes ? escapeMarkdown(row.notes) : '';
         
-        message += `${index + 1}. ${userName} (ID: ${row.chat_id})\n`;
+        message += `${index + 1}\\. ${userName} \\(ID: ${row.chat_id}\\)\n`;
         message += `   📅 Выдан: ${grantedDate}\n`;
-        message += `   ⏳ Истекает: ${expiresDate} (${daysLeft} дн.)\n`;
+        message += `   ⏳ Истекает: ${expiresDate} \\(${daysLeft} дн\\.\\)\n`;
         message += `   🔑 Ключей: ${row.key_count || 0}\n`;
         message += `   ${row.is_active ? '✅ Активен' : '❌ Неактивен'}\n`;
         if (row.notes) {
-          message += `   📝 Заметки: ${row.notes}\n`;
+          message += `   📝 Заметки: ${notes}\n`;
         }
         message += `\n`;
       });
@@ -450,13 +466,13 @@ bot.hears('📋 Список пользователей', async (ctx) => {
       const parts = message.match(/[\s\S]{1,4000}/g) || [];
       for (let i = 0; i < parts.length; i++) {
         await ctx.reply(parts[i], { 
-          parse_mode: 'Markdown',
+          parse_mode: 'MarkdownV2',
           ...(i === parts.length - 1 ? adminMenu : {})
         });
       }
     } else {
       await ctx.reply(message, { 
-        parse_mode: 'Markdown',
+        parse_mode: 'MarkdownV2',
         ...adminMenu 
       });
     }
@@ -523,19 +539,19 @@ bot.hears('📊 Статистика доступа', async (ctx) => {
     }
     
     const message = 
-      `📊 *Статистика системы*\n\n` +
-      `👥 *Пользователи:*\n` +
+      `*📊 Статистика системы*\n\n` +
+      `*👥 Пользователи:*\n` +
       `• Всего пользователей: ${totalUsers.rows[0].count}\n` +
       `• Активных подписок: ${activeUsers.rows[0].count}\n` +
       `• Истекают через 7 дней: ${expiringSoon.rows[0].count}\n` +
       `• Истекших подписок: ${expiredUsers.rows[0].count}\n` +
       `• Деактивированных: ${inactiveUsers.rows[0].count}\n\n` +
-      `🔑 *Ключи по платформам:*\n${platformStats}\n\n` +
-      `👑 *Администраторы:* ${ADMIN_CHAT_IDS.length}\n` +
+      `*🔑 Ключи по платформам:*\n${platformStats}\n\n` +
+      `*👑 Администраторы:* ${ADMIN_CHAT_IDS.length}\n` +
       `_Данные обновлены: ${new Date().toLocaleString('ru-RU')}_`;
     
     await ctx.reply(message, { 
-      parse_mode: 'Markdown',
+      parse_mode: 'MarkdownV2',
       ...adminMenu 
     });
     
@@ -561,10 +577,11 @@ bot.on('text', async (ctx) => {
       // Валидация chat_id
       if (!/^\d{8,12}$/.test(text)) {
         await ctx.reply(
-          '❌ Неверный формат chat_id!\n\n' +
-          'chat_id должен содержать только цифры (8-12 символов).\n' +
+          '❌ Неверный формат chat\\_id\\!\n\n' +
+          'chat\\_id должен содержать только цифры \\(8\\-12 символов\\)\\.\n' +
           'Пример: 7909570066\n\n' +
-          'Попробуйте еще раз:'
+          'Попробуйте еще раз:',
+          { parse_mode: 'MarkdownV2' }
         );
         return;
       }
@@ -573,14 +590,14 @@ bot.on('text', async (ctx) => {
       
       // Проверяем, не является ли пользователь самим собой
       if (userId === chatId) {
-        await ctx.reply('❌ Нельзя добавить самого себя!', adminMenu);
+        await ctx.reply('❌ Нельзя добавить самого себя\\!', { parse_mode: 'MarkdownV2', ...adminMenu });
         adminStates.delete(chatId);
         return;
       }
       
       // Проверяем, не является ли пользователь другим админом
       if (ADMIN_CHAT_IDS.includes(userId.toString())) {
-        await ctx.reply('❌ Этот пользователь уже является администратором!', adminMenu);
+        await ctx.reply('❌ Этот пользователь уже является администратором\\!', { parse_mode: 'MarkdownV2', ...adminMenu });
         adminStates.delete(chatId);
         return;
       }
@@ -603,15 +620,15 @@ bot.on('text', async (ctx) => {
           const isActive = row.is_active && expiresAt > now;
           
           await ctx.reply(
-            `ℹ️ *Пользователь ${userId} уже есть в системе!*\n\n` +
+            `*ℹ️ Пользователь ${userId} уже есть в системе\\!*\n\n` +
             `Статус: ${isActive ? '✅ Активен' : '❌ Неактивен'}\n` +
             `Истекает: ${formattedDate}\n` +
             `Заметки: ${row.notes || 'нет'}\n\n` +
             `Выберите действие:\n` +
-            `1. *Продлить на 30 дней* (отправьте "1")\n` +
-            `2. *Деактивировать* (отправьте "2")\n` +
-            `3. *Отмена* (отправьте "3")`,
-            { parse_mode: 'Markdown' }
+            `1\\. *Продлить на 30 дней* \\(отправьте "1"\\)\n` +
+            `2\\. *Деактивировать* \\(отправьте "2"\\)\n` +
+            `3\\. *Отмена* \\(отправьте "3"\\)`,
+            { parse_mode: 'MarkdownV2' }
           );
           
           adminState.step = 'confirm_action';
@@ -626,6 +643,7 @@ bot.on('text', async (ctx) => {
         expiresAt.setDate(expiresAt.getDate() + 30);
         
         const adminName = user.username ? `@${user.username}` : user.first_name;
+        const escapedName = escapeMarkdown(adminName);
         
         await db.query(
           `CALL add_user_access($1, $2, $3, $4)`,
@@ -643,13 +661,13 @@ bot.on('text', async (ctx) => {
         try {
           await bot.telegram.sendMessage(
             userId,
-            `🎉 *Вам предоставлен доступ!*\n\n` +
-            `Администратор ${adminName} предоставил вам доступ к Skayfol Analytics.\n\n` +
+            `*🎉 Вам предоставлен доступ\\!*\n\n` +
+            `Администратор ${escapedName} предоставил вам доступ к Skayfol Analytics\\.\n\n` +
             `✅ Доступ активен с сегодняшнего дня\n` +
             `📅 Срок действия: 30 дней\n` +
             `⏳ Истекает: ${expiresAt.toLocaleDateString('ru-RU')}\n\n` +
-            `Используйте /start для начала работы!`,
-            { parse_mode: 'Markdown' }
+            `Используйте /start для начала работы\\!`,
+            { parse_mode: 'MarkdownV2' }
           );
         } catch (error: any) {
           console.log(`ℹ️ Не удалось уведомить пользователя ${userId}: ${error.message}`);
@@ -657,21 +675,21 @@ bot.on('text', async (ctx) => {
         }
         
         await ctx.reply(
-          `✅ Пользователь ${userId} успешно добавлен!\n\n` +
-          `Доступ предоставлен на 30 дней.\n` +
+          `*✅ Пользователь ${userId} успешно добавлен\\!*\n\n` +
+          `Доступ предоставлен на 30 дней\\.\n` +
           `Истекает: ${expiresAt.toLocaleDateString('ru-RU')}\n\n` +
           `${
-            userId.toString() === ADMIN_CHAT_IDS[0] 
+            ADMIN_CHAT_IDS.includes(userId.toString()) 
             ? '_Пользователь получил уведомление_' 
             : '_Пользователь получит уведомление при первом запуске бота_'
           }`,
           { 
-            parse_mode: 'Markdown',
+            parse_mode: 'MarkdownV2',
             ...adminMenu 
           }
         );
         
-        console.log(`👤 Админ ${chatId} (${adminName}) добавил пользователя ${userId}`);
+        console.log(`👤 Админ ${chatId} \\(${adminName}\\) добавил пользователя ${userId}`);
         
       } catch (error) {
         console.error('❌ Ошибка добавления пользователя:', error);
@@ -689,6 +707,7 @@ bot.on('text', async (ctx) => {
       try {
         db = await getOurDbConnection();
         const adminName = user.username ? `@${user.username}` : user.first_name;
+        const escapedName = escapeMarkdown(adminName);
         
         if (text === '1') {
           // Продлить на 30 дней
@@ -715,22 +734,22 @@ bot.on('text', async (ctx) => {
           try {
             await bot.telegram.sendMessage(
               adminState.userId,
-              `🔄 *Ваш доступ продлен!*\n\n` +
-              `Администратор ${adminName} продлил ваш доступ к Skayfol Analytics.\n\n` +
+              `*🔄 Ваш доступ продлен\\!*\n\n` +
+              `Администратор ${escapedName} продлил ваш доступ к Skayfol Analytics\\.\n\n` +
               `✅ Доступ продлен\n` +
               `📅 Новый срок: ${expiresAt.toLocaleDateString('ru-RU')}\n` +
               `⏳ Осталось: 30 дней\n\n` +
-              `Продолжайте пользоваться сервисом!`,
-              { parse_mode: 'Markdown' }
+              `Продолжайте пользоваться сервисом\\!`,
+              { parse_mode: 'MarkdownV2' }
             );
           } catch (error) {
             console.log(`ℹ️ Не удалось уведомить пользователя ${adminState.userId} о продлении`);
           }
           
           await ctx.reply(
-            `✅ Доступ пользователя ${adminState.userId} продлен на 30 дней!\n` +
+            `*✅ Доступ пользователя ${adminState.userId} продлен на 30 дней\\!*\n` +
             `Новая дата истечения: ${expiresAt.toLocaleDateString('ru-RU')}`,
-            adminMenu
+            { parse_mode: 'MarkdownV2', ...adminMenu }
           );
           
         } else if (text === '2') {
@@ -743,15 +762,15 @@ bot.on('text', async (ctx) => {
           await logAdminAction(chatId, 'deactivate_access', adminState.userId, { admin: adminName });
           
           await ctx.reply(
-            `✅ Пользователь ${adminState.userId} деактивирован.`,
-            adminMenu
+            `*✅ Пользователь ${adminState.userId} деактивирован\\.*`,
+            { parse_mode: 'MarkdownV2', ...adminMenu }
           );
           
         } else if (text === '3') {
           // Отмена
-          await ctx.reply('❌ Действие отменено.', adminMenu);
+          await ctx.reply('*❌ Действие отменено\\.*', { parse_mode: 'MarkdownV2', ...adminMenu });
         } else {
-          await ctx.reply('❌ Неверный выбор. Используйте 1, 2 или 3.', adminMenu);
+          await ctx.reply('*❌ Неверный выбор\\. Используйте 1, 2 или 3\\.*', { parse_mode: 'MarkdownV2', ...adminMenu });
           return;
         }
         
@@ -770,8 +789,8 @@ bot.on('text', async (ctx) => {
   
   // Пропускаем команды получения ID
   if (text === '/myid' || text === '/id') {
-    await ctx.reply(`Ваш chat_id: \`${chatId}\``, { 
-      parse_mode: 'Markdown',
+    await ctx.reply(`Ваш chat\\_id: \`${chatId}\``, { 
+      parse_mode: 'MarkdownV2',
       ...removeKeyboard 
     });
     return;
@@ -785,13 +804,13 @@ bot.on('text', async (ctx) => {
       const allowedCommands = ['/start', '/myid', '/id'];
       if (!allowedCommands.includes(text)) {
         await ctx.reply(
-          `❌ *Доступ запрещен*\n\n` +
-          `У вас нет активной подписки.\n` +
-          `Для получения доступа обратитесь к администратору.\n\n` +
+          `*❌ Доступ запрещен*\n\n` +
+          `У вас нет активной подписки\\.\n` +
+          `Для получения доступа обратитесь к администратору\\.\n\n` +
           `Ваш ID: \`${chatId}\`\n\n` +
-          `📞 Контакт: @Seo_skayfol_analytics`,
+          `📞 Контакт: @Seo\\_skayfol\\_analytics`,
           { 
-            parse_mode: 'Markdown',
+            parse_mode: 'MarkdownV2',
             ...removeKeyboard 
           }
         );
@@ -835,11 +854,11 @@ bot.on('text', async (ctx) => {
       if (exists.rows.length > 0) {
         const savedAt = new Date(exists.rows[0].created_at).toLocaleString('ru-RU');
         await ctx.reply(
-          `⚠️ *Этот ключ уже был сохранён!*\n\n` +
+          `*⚠️ Этот ключ уже был сохранён\\!*\n\n` +
           `_Дата сохранения: ${savedAt}_\n\n` +
           `Выберите действие:`,
           { 
-            parse_mode: 'Markdown',
+            parse_mode: 'MarkdownV2',
             ...mainMenu 
           }
         );
@@ -871,13 +890,13 @@ bot.on('text', async (ctx) => {
       }
       
       await ctx.reply(
-        `✅ *Ключ успешно сохранён!*\n\n` +
+        `*✅ Ключ успешно сохранён\\!*\n\n` +
         `Платформа: *${userState.platformDisplay}*\n` +
-        `Мы начали обработку ваших данных.\n` +
-        `Вы получите уведомление когда анализ будет готов.\n\n` +
-        `_Обычно это занимает 5-15 минут_`,
+        `Мы начали обработку ваших данных\\.\n` +
+        `Вы получите уведомление когда анализ будет готов\\.\n\n` +
+        `_Обычно это занимает 5\\-15 минут_`,
         { 
-          parse_mode: 'Markdown',
+          parse_mode: 'MarkdownV2',
           ...mainMenu 
         }
       );
@@ -887,9 +906,9 @@ bot.on('text', async (ctx) => {
     } catch (error) {
       console.error('❌ Ошибка БД заказчика:', error);
       await ctx.reply(
-        '⚠️ *Ошибка сервера*\n\nПожалуйста, попробуйте позже.',
+        '*⚠️ Ошибка сервера*\n\nПожалуйста, попробуйте позже\\.',
         { 
-          parse_mode: 'Markdown',
+          parse_mode: 'MarkdownV2',
           ...mainMenu 
         }
       );
@@ -900,13 +919,13 @@ bot.on('text', async (ctx) => {
   } else if (userState?.waitingForKey) {
     // Пользователь ввёл не ключ, а что-то другое
     await ctx.reply(
-      'Это не похоже на API-ключ. Отправьте длинную строку (от 30 символов).',
+      'Это не похоже на API\\-ключ\\. Отправьте длинную строку \\(от 30 символов\\)\\.',
       removeKeyboard
     );
   } else if (!isAdmin(chatId)) {
     // Не похоже на ключ и нет активного состояния - показываем меню (только для обычных пользователей)
     await ctx.reply(
-      'Пожалуйста, используйте кнопки меню.',
+      'Пожалуйста, используйте кнопки меню\\.',
       mainMenu
     );
   }
@@ -925,13 +944,13 @@ async function showMainMenu(ctx) {
     const { hasAccess } = await checkUserAccess(chatId);
     if (!hasAccess) {
       await ctx.reply(
-        `❌ *Доступ запрещен*\n\n` +
-        `У вас нет активной подписки.\n` +
-        `Для получения доступа обратитесь к администратору.\n\n` +
+        `*❌ Доступ запрещен*\n\n` +
+        `У вас нет активной подписки\\.\n` +
+        `Для получения доступа обратитесь к администратору\\.\n\n` +
         `Ваш ID: \`${chatId}\`\n\n` +
-        `📞 Контакт: @Seo_skayfol_analytics`,
+        `📞 Контакт: @Seo\\_skayfol\\_analytics`,
         { 
-          parse_mode: 'Markdown',
+          parse_mode: 'MarkdownV2',
           ...removeKeyboard 
         }
       );
@@ -941,13 +960,13 @@ async function showMainMenu(ctx) {
   
   await ctx.reply(
     `*🔐 Skayfol Analytics*\n\n` +
-    `Добро пожаловать в систему аналитики рекламных кампаний!\n\n` +
+    `Добро пожаловать в систему аналитики рекламных кампаний\\!\n\n` +
     `*Что умеет бот:*\n` +
-    `✅ Принимает API-ключи от разных платформ\n` +
+    `✅ Принимает API\\-ключи от разных платформ\n` +
     `✅ Сохраняет в безопасное хранилище\n` +
     `✅ Уведомляет о результатах анализа`,
     { 
-      parse_mode: 'Markdown'
+      parse_mode: 'MarkdownV2'
     }
   );
   
@@ -968,9 +987,9 @@ bot.hears('📞 Связаться с поддержкой', async (ctx) => {
     const { hasAccess } = await checkUserAccess(chatId);
     if (!hasAccess) {
       await ctx.reply(
-        `❌ *Доступ запрещен*\n\n` +
-        `У вас нет активной подписки.`,
-        { parse_mode: 'Markdown' }
+        `*❌ Доступ запрещен*\n\n` +
+        `У вас нет активной подписки\\.`,
+        { parse_mode: 'MarkdownV2' }
       );
       return;
     }
@@ -979,7 +998,7 @@ bot.hears('📞 Связаться с поддержкой', async (ctx) => {
   await ctx.reply(
     `Нажмите кнопку ниже, чтобы написать в поддержку:`,
     { 
-      parse_mode: 'Markdown',
+      parse_mode: 'MarkdownV2',
       ...supportButton 
     }
   );
@@ -996,18 +1015,18 @@ bot.hears('🔑 Отправить API-ключ', async (ctx) => {
     const { hasAccess } = await checkUserAccess(chatId);
     if (!hasAccess) {
       await ctx.reply(
-        `❌ *Доступ запрещен*\n\n` +
-        `У вас нет активной подписки.`,
-        { parse_mode: 'Markdown' }
+        `*❌ Доступ запрещен*\n\n` +
+        `У вас нет активной подписки\\.`,
+        { parse_mode: 'MarkdownV2' }
       );
       return;
     }
   }
   
   await ctx.reply(
-    'Выберите платформу для которой добавляете API-ключ:',
+    'Выберите платформу для которой добавляете API\\-ключ:',
     { 
-      parse_mode: 'Markdown',
+      parse_mode: 'MarkdownV2',
       ...platformMenu 
     }
   );
@@ -1021,13 +1040,14 @@ bot.hears('📊 Мой статус', async (ctx) => {
   if (isAdmin(chatId)) {
     const user = ctx.from;
     const adminName = user.username ? `@${user.username}` : user.first_name;
+    const escapedName = escapeMarkdown(adminName);
     
     await ctx.reply(
-      `👑 *Вы администратор* (${adminName})\n\n` +
-      `Используйте команду /admin для управления системой.\n` +
+      `*👑 Вы администратор \\(${escapedName}\\)*\n\n` +
+      `Используйте команду /admin для управления системой\\.\n` +
       `Всего администраторов: ${ADMIN_CHAT_IDS.length}`,
       { 
-        parse_mode: 'Markdown',
+        parse_mode: 'MarkdownV2',
         ...mainMenu 
       }
     );
@@ -1038,9 +1058,9 @@ bot.hears('📊 Мой статус', async (ctx) => {
   const { hasAccess, daysLeft, expiresAt } = await checkUserAccess(chatId);
   if (!hasAccess) {
     await ctx.reply(
-      `❌ *Доступ запрещен*\n\n` +
-      `У вас нет активной подписки.`,
-      { parse_mode: 'Markdown' }
+      `*❌ Доступ запрещен*\n\n` +
+      `У вас нет активной подписки\\.`,
+      { parse_mode: 'MarkdownV2' }
     );
     return;
   }
@@ -1078,7 +1098,7 @@ bot.hears('📊 Мой статус', async (ctx) => {
     message += '*📊 Ваши ключи:*\n';
     
     if (keysResult.rows.length === 0) {
-      message += 'У вас пока нет сохранённых ключей.\nИспользуйте кнопку "🔑 Отправить API-ключ" чтобы добавить первый ключ.';
+      message += 'У вас пока нет сохранённых ключей\\.\nИспользуйте кнопку "🔑 Отправить API\\-ключ" чтобы добавить первый ключ\\.';
     } else {
       const platformNames = {
         'meta': 'Meta',
@@ -1104,7 +1124,7 @@ bot.hears('📊 Мой статус', async (ctx) => {
     await ctx.reply(
       message,
       { 
-        parse_mode: 'Markdown',
+        parse_mode: 'MarkdownV2',
         ...mainMenu 
       }
     );
@@ -1126,9 +1146,9 @@ bot.hears(['1. Meta', '2. Tik Tok', '3. Google', '4. Others'], async (ctx) => {
     const { hasAccess } = await checkUserAccess(chatId);
     if (!hasAccess) {
       await ctx.reply(
-        `❌ *Доступ запрещен*\n\n` +
-        `У вас нет активной подписки.`,
-        { parse_mode: 'Markdown' }
+        `*❌ Доступ запрещен*\n\n` +
+        `У вас нет активной подписки\\.`,
+        { parse_mode: 'MarkdownV2' }
       );
       return;
     }
@@ -1158,13 +1178,13 @@ bot.hears(['1. Meta', '2. Tik Tok', '3. Google', '4. Others'], async (ctx) => {
   
   await ctx.reply(
     `Выбрана платформа: *${platformNames[platform]}*\n\n` +
-    `Теперь отправьте ваш API-ключ *одной строкой*.\n\n` +
+    `Теперь отправьте ваш API\\-ключ *одной строкой*\\.\n\n` +
     `*Пример формата:*\n` +
-    `\`sk_test_51Nm...\` (тестовый ключ)\n` +
-    `\`eyJ0eXAiOiJKV1QiLCJhbGciOiJ...\` (JWT токен)\n\n` +
-    `_Ключ должен быть длинным (от 30 символов)_`,
+    `\`sk\\_test\\_51Nm\\.\\.\\.\` \\(тестовый ключ\\)\n` +
+    `\`eyJ0eXAiOiJKV1QiLCJhbGciOiJ\\.\\.\\.\` \\(JWT токен\\)\n\n` +
+    `_Ключ должен быть длинным \\(от 30 символов\\)_`,
     { 
-      parse_mode: 'Markdown',
+      parse_mode: 'MarkdownV2',
       ...removeKeyboard 
     }
   );
@@ -1178,9 +1198,9 @@ bot.hears('↩️ Назад', async (ctx) => {
     const { hasAccess } = await checkUserAccess(chatId);
     if (!hasAccess) {
       await ctx.reply(
-        `❌ *Доступ запрещен*\n\n` +
-        `У вас нет активной подписки.`,
-        { parse_mode: 'Markdown' }
+        `*❌ Доступ запрещен*\n\n` +
+        `У вас нет активной подписки\\.`,
+        { parse_mode: 'MarkdownV2' }
       );
       return;
     }
@@ -1190,7 +1210,7 @@ bot.hears('↩️ Назад', async (ctx) => {
   await ctx.reply(
     'Выберите действие:',
     { 
-      parse_mode: 'Markdown',
+      parse_mode: 'MarkdownV2',
       ...mainMenu 
     }
   );
