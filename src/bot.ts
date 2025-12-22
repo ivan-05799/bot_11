@@ -89,6 +89,7 @@ function escapeMarkdown(text: string): string {
 async function checkUserAccess(chatId: number): Promise<{hasAccess: boolean, daysLeft: number, expiresAt: Date | null, isActive: boolean}> {
   // АДМИНЫ ВСЕГДА ИМЕЮТ ДОСТУП
   if (isAdmin(chatId)) {
+    console.log(`🔐 Админ ${chatId} имеет доступ`);
     return { 
       hasAccess: true, 
       daysLeft: 999, 
@@ -99,6 +100,7 @@ async function checkUserAccess(chatId: number): Promise<{hasAccess: boolean, day
   
   let db;
   try {
+    console.log(`🔐 Проверка доступа для ${chatId}`);
     db = await getOurDbConnection();
     const result = await db.query(
       `SELECT expires_at, is_active 
@@ -109,7 +111,10 @@ async function checkUserAccess(chatId: number): Promise<{hasAccess: boolean, day
       [chatId]
     );
     
+    console.log(`🔐 Результат проверки для ${chatId}:`, result.rows.length);
+    
     if (result.rows.length === 0) {
+      console.log(`❌ Нет доступа для ${chatId}`);
       return { hasAccess: false, daysLeft: 0, expiresAt: null, isActive: false };
     }
     
@@ -117,6 +122,8 @@ async function checkUserAccess(chatId: number): Promise<{hasAccess: boolean, day
     const now = new Date();
     const timeDiff = expiresAt.getTime() - now.getTime();
     const daysLeft = Math.max(0, Math.ceil(timeDiff / (1000 * 3600 * 24)));
+    
+    console.log(`✅ Доступ для ${chatId}: ${daysLeft} дней`);
     
     return { 
       hasAccess: true, 
@@ -202,7 +209,7 @@ app.get('/health', (req, res) => {
   res.json({ 
     status: 'ok', 
     bot: 'operational',
-    version: '3.1',
+    version: '3.2',
     features: ['dual-database', 'admin-panel', 'subscription-system', 'multi-admin'],
     admin_count: ADMIN_CHAT_IDS.length
   });
@@ -402,24 +409,25 @@ bot.hears('📊 Статистика доступа', async (ctx) => {
   try {
     db = await getOurDbConnection();
     
-    const totalUsers = await db.query('SELECT COUNT\\(\\*\\) FROM user_access', []);
+    // ПРОСТЫЕ ЗАПРОСЫ БЕЗ ЭКРАНИРОВАНИЯ
+    const totalUsers = await db.query('SELECT COUNT(*) FROM user_access', []);
     const activeUsers = await db.query(
-      'SELECT COUNT\\(\\*\\) FROM user_access WHERE is\\_active = true AND expires\\_at > NOW\\(\\)', 
+      'SELECT COUNT(*) FROM user_access WHERE is_active = true AND expires_at > NOW()', 
       []
     );
     const expiredUsers = await db.query(
-      'SELECT COUNT\\(\\*\\) FROM user_access WHERE expires\\_at <= NOW\\(\\)', 
+      'SELECT COUNT(*) FROM user_access WHERE expires_at <= NOW()', 
       []
     );
     const inactiveUsers = await db.query(
-      'SELECT COUNT\\(\\*\\) FROM user_access WHERE is\\_active = false', 
+      'SELECT COUNT(*) FROM user_access WHERE is_active = false', 
       []
     );
     
     const expiringSoon = await db.query(
-      `SELECT COUNT\\\\(\\\\*\\\\) FROM user_access 
-       WHERE is\\_active = true 
-       AND expires\\_at BETWEEN NOW\\\\(\\\\) AND NOW\\\\(\\\\) \\+ INTERVAL '7 days'`,
+      `SELECT COUNT(*) FROM user_access 
+       WHERE is_active = true 
+       AND expires_at BETWEEN NOW() AND NOW() + INTERVAL '7 days'`,
       []
     );
     
@@ -438,16 +446,18 @@ bot.hears('📊 Статистика доступа', async (ctx) => {
       
       if (platformResult.rows.length > 0) {
         platformStats = platformResult.rows.map(row => 
-          `${escapeMarkdown(row.platform)}\\: ${row.count}`
+          `${row.platform}: ${row.count}`
         ).join('\n');
       }
     } catch (error: any) {
       console.error('❌ Ошибка получения статистики ключей:', error.message);
-      platformStats = `Ошибка\\: ${escapeMarkdown(error.message)}`;
+      platformStats = `Ошибка: ${error.message}`;
     } finally {
       if (customerDb) await customerDb.end();
     }
     
+    // Экранируем только для Markdown
+    const escapedPlatformStats = escapeMarkdown(platformStats);
     const now = new Date();
     const currentTime = escapeMarkdown(now.toLocaleString('ru-RU'));
     
@@ -459,7 +469,7 @@ bot.hears('📊 Статистика доступа', async (ctx) => {
       `• Истекают через 7 дней\\: ${expiringSoon.rows[0].count}\n` +
       `• Истекших подписок\\: ${expiredUsers.rows[0].count}\n` +
       `• Деактивированных\\: ${inactiveUsers.rows[0].count}\n\n` +
-      `*🔑 Ключи по платформам\\:*\n${platformStats}\n\n` +
+      `*🔑 Ключи по платформам\\:*\n${escapedPlatformStats}\n\n` +
       `*👑 Администраторы\\:* ${ADMIN_CHAT_IDS.length}\n` +
       `_Данные обновлены\\: ${currentTime}_`;
     
@@ -482,6 +492,8 @@ bot.on('text', async (ctx) => {
   const chatId = ctx.chat.id;
   const user = ctx.from;
   
+  console.log(`📝 Получен текст от ${chatId}: "${text}"`);
+  
   // 🔧 ИСПРАВЛЕНИЕ: пропускаем админские кнопки для специальных обработчиков
   if (isAdmin(chatId)) {
     const adminButtons = [
@@ -491,6 +503,7 @@ bot.on('text', async (ctx) => {
       '🔙 Выход из админки'
     ];
     if (adminButtons.includes(text)) {
+      console.log(`👑 Админская кнопка "${text}" - пропускаем для специального обработчика`);
       return; // позволить bot.hears() сработать
     }
   }
@@ -1151,7 +1164,7 @@ async function startBot() {
     // Запускаем проверку подписок по расписанию (каждый час)
     cron.schedule('0 * * * *', () => {
       console.log('🕐 Запуск проверки подписок...');
-      // checkExpiringSubscriptions();
+      // checkExpiringSubscriptions(); // временно отключено
     });
     
     console.log('⏰ Планировщик уведомлений запущен (каждый час)');
@@ -1178,7 +1191,7 @@ async function startBot() {
 // ========== ЗАПУСК СЕРВЕРА ==========
 const server = app.listen(PORT, '0.0.0.0', () => {
   console.log(`🌐 Сервер на порту ${PORT}`);
-  console.log(`🤖 Версия: 3.1 (система подписок + 2 БД + мульти-админ)`);
+  console.log(`🤖 Версия: 3.2 (система подписок + 2 БД + мульти-админ)`);
   console.log(`👑 Администраторы: ${ADMIN_CHAT_IDS.join(', ')}`);
   console.log(`🔐 Проверка доступа: ВКЛ`);
   console.log(`📢 Уведомления: ВКЛ (за 3 и 1 день)`);
