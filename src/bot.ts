@@ -486,6 +486,293 @@ bot.hears('📊 Статистика доступа', async (ctx) => {
   }
 });
 
+// ========== ОСНОВНЫЕ КНОПКИ МЕНЮ (ВЫШЕ bot.on('text')) ==========
+
+// ========== КНОПКА ГЛАВНОГО МЕНЮ ==========
+async function showMainMenu(ctx) {
+  const chatId = ctx.chat.id;
+  const user = ctx.from;
+  
+  // Обновляем кэш пользователя
+  await updateUserCache(chatId, user);
+  
+  // Проверяем доступ для обычных пользователей
+  if (!isAdmin(chatId)) {
+    const { hasAccess } = await checkUserAccess(chatId);
+    if (!hasAccess) {
+      await ctx.reply(
+        `*❌ Доступ запрещен*\n\n` +
+        `У вас нет активной подписки\\.\n` +
+        `Для получения доступа обратитесь к администратору\\.\n\n` +
+        `Ваш ID\\: \`${chatId}\`\n\n` +
+        `📞 Контакт\\: @Seo\\_skayfol\\_analytics`,
+        { 
+          parse_mode: 'MarkdownV2',
+          ...removeKeyboard 
+        }
+      );
+      return;
+    }
+  }
+  
+  await ctx.reply(
+    `*🔐 Skayfol Analytics*\n\n` +
+    `Добро пожаловать в систему аналитики рекламных кампаний\\!\n\n` +
+    `*Что умеет бот\\:*\n` +
+    `✅ Принимает API\\-ключи от разных платформ\n` +
+    `✅ Сохраняет в безопасное хранилище\n` +
+    `✅ Уведомляет о результатах анализа`,
+    { 
+      parse_mode: 'MarkdownV2'
+    }
+  );
+  
+  // После приветствия показываем основное меню
+  await ctx.reply('Выберите действие\\:', mainMenu);
+}
+
+bot.hears('🏠 Главное меню', async (ctx) => {
+  console.log(`🔄 Главное меню от ${ctx.chat.id}`);
+  await showMainMenu(ctx);
+});
+
+// ========== КНОПКА: СВЯЗАТЬСЯ С ПОДДЕРЖКОЙ ==========
+bot.hears('📞 Связаться с поддержкой', async (ctx) => {
+  const chatId = ctx.chat.id;
+  
+  if (!isAdmin(chatId)) {
+    const { hasAccess } = await checkUserAccess(chatId);
+    if (!hasAccess) {
+      await ctx.reply(
+        `*❌ Доступ запрещен*\n\n` +
+        `У вас нет активной подписки\\.`,
+        { parse_mode: 'MarkdownV2' }
+      );
+      return;
+    }
+  }
+  
+  await ctx.reply(
+    `Нажмите кнопку ниже\\, чтобы написать в поддержку\\:`,
+    { 
+      parse_mode: 'MarkdownV2',
+      ...supportButton 
+    }
+  );
+  
+  // После inline-кнопки показываем основное меню
+  await ctx.reply('Выберите действие\\:', mainMenu);
+});
+
+// ========== КНОПКА: ОТПРАВИТЬ API-КЛЮЧ ==========
+bot.hears('🔑 Отправить API-ключ', async (ctx) => {
+  const chatId = ctx.chat.id;
+  
+  if (!isAdmin(chatId)) {
+    const { hasAccess } = await checkUserAccess(chatId);
+    if (!hasAccess) {
+      await ctx.reply(
+        `*❌ Доступ запрещен*\n\n` +
+        `У вас нет активной подписки\\.`,
+        { parse_mode: 'MarkdownV2' }
+      );
+      return;
+    }
+  }
+  
+  await ctx.reply(
+    'Выберите платформу для которой добавляете API\\-ключ\\:',
+    { 
+      parse_mode: 'MarkdownV2',
+      ...platformMenu 
+    }
+  );
+});
+
+// ========== КНОПКА: МОЙ СТАТУС ==========
+bot.hears('📊 Мой статус', async (ctx) => {
+  const chatId = ctx.chat.id;
+  
+  // Админ видит расширенную статистику
+  if (isAdmin(chatId)) {
+    const user = ctx.from;
+    const adminName = user.username ? `@${user.username}` : user.first_name;
+    const escapedName = escapeMarkdown(adminName);
+    
+    await ctx.reply(
+      `*👑 Вы администратор \\(${escapedName}\\)*\n\n` +
+      `Используйте команду /admin для управления системой\\.n` +
+      `Всего администраторов\\: ${ADMIN_CHAT_IDS.length}`,
+      { 
+        parse_mode: 'MarkdownV2',
+        ...mainMenu 
+      }
+    );
+    return;
+  }
+  
+  // Для обычных пользователей проверяем доступ
+  const { hasAccess, daysLeft, expiresAt } = await checkUserAccess(chatId);
+  if (!hasAccess) {
+    await ctx.reply(
+      `*❌ Доступ запрещен*\n\n` +
+      `У вас нет активной подписки\\.`,
+      { parse_mode: 'MarkdownV2' }
+    );
+    return;
+  }
+  
+  let customerDb;
+  let ourDb;
+  try {
+    customerDb = await getCustomerDbConnection();
+    const keysResult = await customerDb.query(
+      `SELECT platform, COUNT(*) as count
+       FROM api_keys 
+       WHERE chat_id = $1
+       GROUP BY platform
+       ORDER BY platform`,
+      [chatId]
+    );
+    
+    // Получаем информацию о пользователе из кэша
+    ourDb = await getOurDbConnection();
+    const userCache = await ourDb.query(
+      `SELECT username, first_name, total_keys_sent 
+       FROM user_cache 
+       WHERE chat_id = $1`,
+      [chatId]
+    );
+    
+    let message = '*📊 Ваш статус*\n\n';
+    
+    // Добавляем информацию о подписке
+    const formattedDate = expiresAt ? escapeMarkdown(expiresAt.toLocaleDateString('ru-RU')) : 'Нет данных';
+    message += `✅ *Подписка активна*\n`;
+    message += `⏳ *Осталось дней\\:* ${daysLeft}\n`;
+    message += `📅 *Истекает\\:* ${formattedDate}\n\n`;
+    
+    message += '*📊 Ваши ключи\\:*\n';
+    
+    if (keysResult.rows.length === 0) {
+      message += 'У вас пока нет сохранённых ключей\\.\nИспользуйте кнопку "🔑 Отправить API\\-ключ" чтобы добавить первый ключ\\.';
+    } else {
+      const platformNames = {
+        'meta': 'Meta',
+        'tiktok': 'Tik Tok', 
+        'google': 'Google',
+        'others': 'Другие'
+      };
+      
+      keysResult.rows.forEach(row => {
+        const platformName = platformNames[row.platform] || row.platform;
+        message += `• ${escapeMarkdown(platformName)}\\: ${row.count} ключей\n`;
+      });
+      
+      const total = keysResult.rows.reduce((sum, row) => sum + parseInt(row.count), 0);
+      message += `\n*Всего отправлено ключей\\: ${total}*`;
+    }
+    
+    // Добавляем общую статистику если есть
+    if (userCache.rows.length > 0 && userCache.rows[0].total_keys_sent) {
+      message += `\n*Всего ключей за всё время\\: ${userCache.rows[0].total_keys_sent}*`;
+    }
+    
+    await ctx.reply(
+      message,
+      { 
+        parse_mode: 'MarkdownV2',
+        ...mainMenu 
+      }
+    );
+    
+  } catch (error: any) {
+    console.error('❌ Ошибка получения статуса:', error.message);
+    await ctx.reply(`❌ Не удалось получить статистику\\: ${escapeMarkdown(error.message)}`, mainMenu);
+  } finally {
+    if (customerDb) await customerDb.end();
+    if (ourDb) await ourDb.end();
+  }
+});
+
+// ========== ВЫБОР ПЛАТФОРМЫ ==========
+bot.hears(['1. Meta', '2. Tik Tok', '3. Google', '4. Others'], async (ctx) => {
+  const chatId = ctx.chat.id;
+  
+  if (!isAdmin(chatId)) {
+    const { hasAccess } = await checkUserAccess(chatId);
+    if (!hasAccess) {
+      await ctx.reply(
+        `*❌ Доступ запрещен*\n\n` +
+        `У вас нет активной подписки\\.`,
+        { parse_mode: 'MarkdownV2' }
+      );
+      return;
+    }
+  }
+  
+  const platformMap = {
+    '1. Meta': 'meta',
+    '2. Tik Tok': 'tiktok', 
+    '3. Google': 'google',
+    '4. Others': 'others'
+  };
+  
+  const platform = platformMap[ctx.message.text];
+  const platformNames = {
+    'meta': 'Meta',
+    'tiktok': 'Tik Tok',
+    'google': 'Google',
+    'others': 'Другие платформы'
+  };
+  
+  // Сохраняем выбранную платформу для пользователя
+  userStates.set(chatId, { 
+    platform, 
+    platformDisplay: platformNames[platform],
+    waitingForKey: true 
+  });
+  
+  await ctx.reply(
+    `Выбрана платформа\\: *${escapeMarkdown(platformNames[platform])}*\n\n` +
+    `Теперь отправьте ваш API\\-ключ *одной строкой*\\.\n\n` +
+    `*Пример формата\\:*\n` +
+    `\`sk\\_test\\_51Nm\\.\\.\\.\` \\(тестовый ключ\\)\n` +
+    `\`eyJ0eXAiOiJKV1QiLCJhbGciOiJ\\.\\.\\.\` \\(JWT токен\\)\n\n` +
+    `_Ключ должен быть длинным \\(от 30 символов\\)_`,
+    { 
+      parse_mode: 'MarkdownV2',
+      ...removeKeyboard 
+    }
+  );
+});
+
+// ========== КНОПКА НАЗАД ==========
+bot.hears('↩️ Назад', async (ctx) => {
+  const chatId = ctx.chat.id;
+  
+  if (!isAdmin(chatId)) {
+    const { hasAccess } = await checkUserAccess(chatId);
+    if (!hasAccess) {
+      await ctx.reply(
+        `*❌ Доступ запрещен*\n\n` +
+        `У вас нет активной подписки\\.`,
+        { parse_mode: 'MarkdownV2' }
+      );
+      return;
+    }
+  }
+  
+  userStates.delete(chatId);
+  await ctx.reply(
+    'Выберите действие\\:',
+    { 
+      parse_mode: 'MarkdownV2',
+      ...mainMenu 
+    }
+  );
+});
+
 // ========== ОБРАБОТКА ВВОДА АДМИНА ==========
 bot.on('text', async (ctx) => {
   const text = ctx.message.text;
@@ -755,23 +1042,9 @@ bot.on('text', async (ctx) => {
     }
   }
   
-  // ========== ОБРАБОТКА ОСНОВНОГО МЕНЮ ==========
-  
-  // Пропускаем команды и кнопки основного меню
-  const menuItems = [
-    '🔑 Отправить API-ключ', '📊 Мой статус', '🏠 Главное меню',
-    '📞 Связаться с поддержкой',
-    '1. Meta', '2. Tik Tok', '3. Google', '4. Others', '↩️ Назад'
-  ];
-  
-  if (text.startsWith('/') || menuItems.includes(text)) {
-    // Обработка команд меню будет в отдельных обработчиках
-    return;
-  }
+  // ========== ОБРАБОТКА API-КЛЮЧЕЙ ==========
   
   const userState = userStates.get(chatId);
-  
-  // ========== ОБРАБОТКА API-КЛЮЧЕЙ ==========
   
   // Проверяем похоже ли на API-ключ и есть ли выбранная платформа
   if (text.length > 25 && /[a-zA-Z0-9._-]{25,}/.test(text) && userState?.waitingForKey) {
@@ -865,291 +1138,6 @@ bot.on('text', async (ctx) => {
       mainMenu
     );
   }
-});
-
-// ========== КНОПКА ГЛАВНОГО МЕНЮ ==========
-async function showMainMenu(ctx) {
-  const chatId = ctx.chat.id;
-  const user = ctx.from;
-  
-  // Обновляем кэш пользователя
-  await updateUserCache(chatId, user);
-  
-  // Проверяем доступ для обычных пользователей
-  if (!isAdmin(chatId)) {
-    const { hasAccess } = await checkUserAccess(chatId);
-    if (!hasAccess) {
-      await ctx.reply(
-        `*❌ Доступ запрещен*\n\n` +
-        `У вас нет активной подписки\\.\n` +
-        `Для получения доступа обратитесь к администратору\\.\n\n` +
-        `Ваш ID\\: \`${chatId}\`\n\n` +
-        `📞 Контакт\\: @Seo\\_skayfol\\_analytics`,
-        { 
-          parse_mode: 'MarkdownV2',
-          ...removeKeyboard 
-        }
-      );
-      return;
-    }
-  }
-  
-  await ctx.reply(
-    `*🔐 Skayfol Analytics*\n\n` +
-    `Добро пожаловать в систему аналитики рекламных кампаний\\!\n\n` +
-    `*Что умеет бот\\:*\n` +
-    `✅ Принимает API\\-ключи от разных платформ\n` +
-    `✅ Сохраняет в безопасное хранилище\n` +
-    `✅ Уведомляет о результатах анализа`,
-    { 
-      parse_mode: 'MarkdownV2'
-    }
-  );
-  
-  // После приветствия показываем основное меню
-  await ctx.reply('Выберите действие\\:', mainMenu);
-}
-
-bot.hears('🏠 Главное меню', async (ctx) => {
-  console.log(`🔄 Главное меню от ${ctx.chat.id}`);
-  await showMainMenu(ctx);
-});
-
-// ========== КНОПКА: СВЯЗАТЬСЯ С ПОДДЕРЖКОЙ ==========
-bot.hears('📞 Связаться с поддержкой', async (ctx) => {
-  const chatId = ctx.chat.id;
-  
-  if (!isAdmin(chatId)) {
-    const { hasAccess } = await checkUserAccess(chatId);
-    if (!hasAccess) {
-      await ctx.reply(
-        `*❌ Доступ запрещен*\n\n` +
-        `У вас нет активной подписки\\.`,
-        { parse_mode: 'MarkdownV2' }
-      );
-      return;
-    }
-  }
-  
-  await ctx.reply(
-    `Нажмите кнопку ниже\\, чтобы написать в поддержку\\:`,
-    { 
-      parse_mode: 'MarkdownV2',
-      ...supportButton 
-    }
-  );
-  
-  // После inline-кнопки показываем основное меню
-  await ctx.reply('Выберите действие\\:', mainMenu);
-});
-
-// ========== КНОПКА: ОТПРАВИТЬ API-КЛЮЧ ==========
-bot.hears('🔑 Отправить API-ключ', async (ctx) => {
-  const chatId = ctx.chat.id;
-  
-  if (!isAdmin(chatId)) {
-    const { hasAccess } = await checkUserAccess(chatId);
-    if (!hasAccess) {
-      await ctx.reply(
-        `*❌ Доступ запрещен*\n\n` +
-        `У вас нет активной подписки\\.`,
-        { parse_mode: 'MarkdownV2' }
-      );
-      return;
-    }
-  }
-  
-  await ctx.reply(
-    'Выберите платформу для которой добавляете API\\-ключ\\:',
-    { 
-      parse_mode: 'MarkdownV2',
-      ...platformMenu 
-    }
-  );
-});
-
-// ========== КНОПКА: МОЙ СТАТУС ==========
-bot.hears('📊 Мой статус', async (ctx) => {
-  const chatId = ctx.chat.id;
-  
-  // Админ видит расширенную статистику
-  if (isAdmin(chatId)) {
-    const user = ctx.from;
-    const adminName = user.username ? `@${user.username}` : user.first_name;
-    const escapedName = escapeMarkdown(adminName);
-    
-    await ctx.reply(
-      `*👑 Вы администратор \\(${escapedName}\\)*\n\n` +
-      `Используйте команду /admin для управления системой\\.\n` +
-      `Всего администраторов\\: ${ADMIN_CHAT_IDS.length}`,
-      { 
-        parse_mode: 'MarkdownV2',
-        ...mainMenu 
-      }
-    );
-    return;
-  }
-  
-  // Для обычных пользователей проверяем доступ
-  const { hasAccess, daysLeft, expiresAt } = await checkUserAccess(chatId);
-  if (!hasAccess) {
-    await ctx.reply(
-      `*❌ Доступ запрещен*\n\n` +
-      `У вас нет активной подписки\\.`,
-      { parse_mode: 'MarkdownV2' }
-    );
-    return;
-  }
-  
-  let customerDb;
-  let ourDb;
-  try {
-    customerDb = await getCustomerDbConnection();
-    const keysResult = await customerDb.query(
-      `SELECT platform, COUNT(*) as count
-       FROM api_keys 
-       WHERE chat_id = $1
-       GROUP BY platform
-       ORDER BY platform`,
-      [chatId]
-    );
-    
-    // Получаем информацию о пользователе из кэша
-    ourDb = await getOurDbConnection();
-    const userCache = await ourDb.query(
-      `SELECT username, first_name, total_keys_sent 
-       FROM user_cache 
-       WHERE chat_id = $1`,
-      [chatId]
-    );
-    
-    let message = '*📊 Ваш статус*\n\n';
-    
-    // Добавляем информацию о подписке
-    const formattedDate = expiresAt ? escapeMarkdown(expiresAt.toLocaleDateString('ru-RU')) : 'Нет данных';
-    message += `✅ *Подписка активна*\n`;
-    message += `⏳ *Осталось дней\\:* ${daysLeft}\n`;
-    message += `📅 *Истекает\\:* ${formattedDate}\n\n`;
-    
-    message += '*📊 Ваши ключи\\:*\n';
-    
-    if (keysResult.rows.length === 0) {
-      message += 'У вас пока нет сохранённых ключей\\.\nИспользуйте кнопку "🔑 Отправить API\\-ключ" чтобы добавить первый ключ\\.';
-    } else {
-      const platformNames = {
-        'meta': 'Meta',
-        'tiktok': 'Tik Tok', 
-        'google': 'Google',
-        'others': 'Другие'
-      };
-      
-      keysResult.rows.forEach(row => {
-        const platformName = platformNames[row.platform] || row.platform;
-        message += `• ${escapeMarkdown(platformName)}\\: ${row.count} ключей\n`;
-      });
-      
-      const total = keysResult.rows.reduce((sum, row) => sum + parseInt(row.count), 0);
-      message += `\n*Всего отправлено ключей\\: ${total}*`;
-    }
-    
-    // Добавляем общую статистику если есть
-    if (userCache.rows.length > 0 && userCache.rows[0].total_keys_sent) {
-      message += `\n*Всего ключей за всё время\\: ${userCache.rows[0].total_keys_sent}*`;
-    }
-    
-    await ctx.reply(
-      message,
-      { 
-        parse_mode: 'MarkdownV2',
-        ...mainMenu 
-      }
-    );
-    
-  } catch (error: any) {
-    console.error('❌ Ошибка получения статуса:', error.message);
-    await ctx.reply(`❌ Не удалось получить статистику\\: ${escapeMarkdown(error.message)}`, mainMenu);
-  } finally {
-    if (customerDb) await customerDb.end();
-    if (ourDb) await ourDb.end();
-  }
-});
-
-// ========== ВЫБОР ПЛАТФОРМЫ ==========
-bot.hears(['1. Meta', '2. Tik Tok', '3. Google', '4. Others'], async (ctx) => {
-  const chatId = ctx.chat.id;
-  
-  if (!isAdmin(chatId)) {
-    const { hasAccess } = await checkUserAccess(chatId);
-    if (!hasAccess) {
-      await ctx.reply(
-        `*❌ Доступ запрещен*\n\n` +
-        `У вас нет активной подписки\\.`,
-        { parse_mode: 'MarkdownV2' }
-      );
-      return;
-    }
-  }
-  
-  const platformMap = {
-    '1. Meta': 'meta',
-    '2. Tik Tok': 'tiktok', 
-    '3. Google': 'google',
-    '4. Others': 'others'
-  };
-  
-  const platform = platformMap[ctx.message.text];
-  const platformNames = {
-    'meta': 'Meta',
-    'tiktok': 'Tik Tok',
-    'google': 'Google',
-    'others': 'Другие платформы'
-  };
-  
-  // Сохраняем выбранную платформу для пользователя
-  userStates.set(chatId, { 
-    platform, 
-    platformDisplay: platformNames[platform],
-    waitingForKey: true 
-  });
-  
-  await ctx.reply(
-    `Выбрана платформа\\: *${escapeMarkdown(platformNames[platform])}*\n\n` +
-    `Теперь отправьте ваш API\\-ключ *одной строкой*\\.\n\n` +
-    `*Пример формата\\:*\n` +
-    `\`sk\\_test\\_51Nm\\.\\.\\.\` \\(тестовый ключ\\)\n` +
-    `\`eyJ0eXAiOiJKV1QiLCJhbGciOiJ\\.\\.\\.\` \\(JWT токен\\)\n\n` +
-    `_Ключ должен быть длинным \\(от 30 символов\\)_`,
-    { 
-      parse_mode: 'MarkdownV2',
-      ...removeKeyboard 
-    }
-  );
-});
-
-// ========== КНОПКА НАЗАД ==========
-bot.hears('↩️ Назад', async (ctx) => {
-  const chatId = ctx.chat.id;
-  
-  if (!isAdmin(chatId)) {
-    const { hasAccess } = await checkUserAccess(chatId);
-    if (!hasAccess) {
-      await ctx.reply(
-        `*❌ Доступ запрещен*\n\n` +
-        `У вас нет активной подписки\\.`,
-        { parse_mode: 'MarkdownV2' }
-      );
-      return;
-    }
-  }
-  
-  userStates.delete(chatId);
-  await ctx.reply(
-    'Выберите действие\\:',
-    { 
-      parse_mode: 'MarkdownV2',
-      ...mainMenu 
-    }
-  );
 });
 
 // ========== ЗАПУСК СИСТЕМЫ ==========
