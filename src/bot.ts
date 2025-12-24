@@ -221,18 +221,21 @@ async function getOrCreateUserFunnel(chatId: number) {
   try {
     db = await getOurDbConnection();
     
-    // Проверяем, есть ли активная воронка
+    // Пытаемся получить существующую НЕЗАВЕРШЕННУЮ воронку
     const existingFunnel = await db.query(
       `SELECT * FROM user_funnel 
        WHERE chat_id = $1 AND is_completed = false`,
       [chatId]
     );
     
+    // Если воронка уже существует - возвращаем её
     if (existingFunnel.rows.length > 0) {
+      console.log(`✅ Найдена существующая воронка для ${chatId}`);
       return existingFunnel.rows[0];
     }
     
-    // Создаем новую воронку
+    // Воронки нет - создаём новую
+    console.log(`🆕 Создаем новую воронку для ${chatId}`);
     const result = await db.query(
       `INSERT INTO user_funnel (chat_id, current_step) 
        VALUES ($1, 'vertical') 
@@ -241,6 +244,7 @@ async function getOrCreateUserFunnel(chatId: number) {
     );
     
     return result.rows[0];
+    
   } catch (error: any) {
     console.error('❌ Ошибка работы с воронкой:', error.message);
     throw error;
@@ -249,6 +253,7 @@ async function getOrCreateUserFunnel(chatId: number) {
   }
 }
 
+// Другие функции для воронки остаются без изменений:
 /**
  * Обновляет шаг воронки
  */
