@@ -32,7 +32,7 @@ app.use(express.json());
 
 // ========== КЛАВИАТУРЫ ==========
 const mainMenu = Markup.keyboard([
-  ['🔑 Отправить API-ключ'],
+  ['🎯 Выбрать вертикаль'],  // ИЗМЕНЕНО: было '🔑 Отправить API-ключ'
   ['📊 Мой статус'],
   ['📞 Связаться с поддержкой'],
   ['🏠 Главное меню']
@@ -41,6 +41,13 @@ const mainMenu = Markup.keyboard([
 const platformMenu = Markup.keyboard([
   ['1. Meta', '2. Tik Tok'],
   ['3. Google', '4. Others'],
+  ['↩️ Назад']
+]).resize();
+
+// НОВАЯ клавиатура для выбора источника (используется на шаге 3 воронки)
+const sourceMenu = Markup.keyboard([
+  ['1. Meta', '2. Tik Tok'],
+  ['3. Google', '4. Other'],
   ['↩️ Назад']
 ]).resize();
 
@@ -56,6 +63,25 @@ const adminMenu = Markup.keyboard([
 ]).resize();
 
 const removeKeyboard = Markup.removeKeyboard();
+
+// НОВАЯ inline-клавиатура для выбора вертикали (7 кнопок)
+const verticalMenu = Markup.inlineKeyboard([
+  [
+    Markup.button.callback('🎰 Gambling / Betting', 'vertical_gambling'),
+    Markup.button.callback('💸 Finance / MFO', 'vertical_finance')
+  ],
+  [
+    Markup.button.callback('📈 Crypto / Forex', 'vertical_crypto'),
+    Markup.button.callback('💊 Nutra / Beauty', 'vertical_nutra')
+  ],
+  [
+    Markup.button.callback('🔞 Dating / Adult', 'vertical_dating'),
+    Markup.button.callback('📦 E-commerce', 'vertical_ecommerce')
+  ],
+  [
+    Markup.button.callback('🚀 Other', 'vertical_other')
+  ]
+]);
 
 // ========== ПОДКЛЮЧЕНИЯ К БД ==========
 async function getOurDbConnection() {
@@ -185,6 +211,104 @@ async function updateUserCache(chatId: number, userData: any) {
   }
 }
 
+// ========== НОВЫЕ ФУНКЦИИ ДЛЯ РАБОТЫ С ВОРОНКОЙ ==========
+
+/**
+ * Создает или получает активную воронку пользователя
+ */
+async function getOrCreateUserFunnel(chatId: number) {
+  let db;
+  try {
+    db = await getOurDbConnection();
+    
+    // Проверяем, есть ли активная воронка
+    const existingFunnel = await db.query(
+      `SELECT * FROM user_funnel 
+       WHERE chat_id = $1 AND is_completed = false`,
+      [chatId]
+    );
+    
+    if (existingFunnel.rows.length > 0) {
+      return existingFunnel.rows[0];
+    }
+    
+    // Создаем новую воронку
+    const result = await db.query(
+      `INSERT INTO user_funnel (chat_id, current_step) 
+       VALUES ($1, 'vertical') 
+       RETURNING *`,
+      [chatId]
+    );
+    
+    return result.rows[0];
+  } catch (error: any) {
+    console.error('❌ Ошибка работы с воронкой:', error.message);
+    throw error;
+  } finally {
+    if (db) await db.end();
+  }
+}
+
+/**
+ * Обновляет шаг воронки
+ */
+async function updateFunnelStep(chatId: number, step: string) {
+  let db;
+  try {
+    db = await getOurDbConnection();
+    await db.query(
+      `UPDATE user_funnel 
+       SET current_step = $1, updated_at = NOW() 
+       WHERE chat_id = $2 AND is_completed = false`,
+      [step, chatId]
+    );
+  } catch (error: any) {
+    console.error('❌ Ошибка обновления шага воронки:', error.message);
+  } finally {
+    if (db) await db.end();
+  }
+}
+
+/**
+ * Обновляет поле в воронке
+ */
+async function updateFunnelField(chatId: number, field: string, value: any) {
+  let db;
+  try {
+    db = await getOurDbConnection();
+    await db.query(
+      `UPDATE user_funnel 
+       SET ${field} = $1, updated_at = NOW() 
+       WHERE chat_id = $2 AND is_completed = false`,
+      [value, chatId]
+    );
+  } catch (error: any) {
+    console.error(`❌ Ошибка обновления поля ${field}:`, error.message);
+  } finally {
+    if (db) await db.end();
+  }
+}
+
+/**
+ * Завершает воронку
+ */
+async function completeFunnel(chatId: number) {
+  let db;
+  try {
+    db = await getOurDbConnection();
+    await db.query(
+      `UPDATE user_funnel 
+       SET is_completed = true, updated_at = NOW() 
+       WHERE chat_id = $1 AND is_completed = false`,
+      [chatId]
+    );
+  } catch (error: any) {
+    console.error('❌ Ошибка завершения воронки:', error.message);
+  } finally {
+    if (db) await db.end();
+  }
+}
+
 // ========== WEBHOOK ДЛЯ ЗАКАЗЧИКА ==========
 app.post('/api/send-message', async (req, res) => {
   try {
@@ -209,10 +333,74 @@ app.get('/health', (req, res) => {
   res.json({ 
     status: 'ok', 
     bot: 'operational',
-    version: '3.2',
-    features: ['dual-database', 'admin-panel', 'subscription-system', 'multi-admin'],
+    version: '3.3',  // ОБНОВЛЕНО: новая версия с воронкой
+    features: ['dual-database', 'admin-panel', 'subscription-system', 'multi-admin', 'user-funnel'],
     admin_count: ADMIN_CHAT_IDS.length
   });
+});
+
+// ========== НОВЫЕ WEBHOOK ДЛЯ ПОЛУЧЕНИЯ ДАННЫХ ВОРОНКИ ==========
+app.get('/api/user-funnel/:chat_id', async (req, res) => {
+  try {
+    const chatId = req.params.chat_id;
+    
+    if (!chatId) {
+      return res.status(400).json({ error: 'Нужен chat_id' });
+    }
+
+    const db = await getOurDbConnection();
+    const result = await db.query(
+      `SELECT * FROM user_funnel 
+       WHERE chat_id = $1 
+       ORDER BY created_at DESC 
+       LIMIT 1`,
+      [chatId]
+    );
+    
+    await db.end();
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Воронка не найдена' });
+    }
+    
+    res.json({ success: true, data: result.rows[0] });
+    
+  } catch (error: any) {
+    console.error('❌ [WEBHOOK] Ошибка получения воронки:', error.message);
+    res.status(500).json({ error: 'Ошибка получения данных' });
+  }
+});
+
+app.get('/api/user-funnel', async (req, res) => {
+  try {
+    const { limit = 50, offset = 0 } = req.query;
+    
+    const db = await getOurDbConnection();
+    const result = await db.query(
+      `SELECT uf.*, uc.username, uc.first_name 
+       FROM user_funnel uf
+       LEFT JOIN user_cache uc ON uf.chat_id = uc.chat_id
+       ORDER BY uf.created_at DESC 
+       LIMIT $1 OFFSET $2`,
+      [parseInt(limit as string), parseInt(offset as string)]
+    );
+    
+    const totalResult = await db.query('SELECT COUNT(*) FROM user_funnel');
+    
+    await db.end();
+    
+    res.json({ 
+      success: true, 
+      data: result.rows,
+      total: parseInt(totalResult.rows[0].count),
+      limit: parseInt(limit as string),
+      offset: parseInt(offset as string)
+    });
+    
+  } catch (error: any) {
+    console.error('❌ [WEBHOOK] Ошибка получения списка воронок:', error.message);
+    res.status(500).json({ error: 'Ошибка получения данных' });
+  }
 });
 
 // ========== ХРАНЕНИЕ ВРЕМЕННЫХ ДАННЫХ ==========
@@ -456,6 +644,10 @@ bot.hears('📊 Статистика доступа', async (ctx) => {
       if (customerDb) await customerDb.end();
     }
     
+    // Получаем статистику по воронкам
+    const funnelStats = await db.query('SELECT * FROM funnel_stats', []);
+    const funnelRow = funnelStats.rows[0];
+    
     // Экранируем только для Markdown
     const escapedPlatformStats = escapeMarkdown(platformStats);
     const now = new Date();
@@ -469,6 +661,14 @@ bot.hears('📊 Статистика доступа', async (ctx) => {
       `• Истекают через 7 дней\\: ${expiringSoon.rows[0].count}\n` +
       `• Истекших подписок\\: ${expiredUsers.rows[0].count}\n` +
       `• Деактивированных\\: ${inactiveUsers.rows[0].count}\n\n` +
+      `*📊 Воронки\\:*\n` +
+      `• Всего воронок\\: ${funnelRow.total_funnels}\n` +
+      `• Активных\\: ${funnelRow.active_funnels}\n` +
+      `• Завершённых\\: ${funnelRow.completed_funnels}\n` +
+      `• На шаге GEO\\: ${funnelRow.on_geo_step}\n` +
+      `• На шаге источника\\: ${funnelRow.on_source_step}\n` +
+      `• На шаге цены\\: ${funnelRow.on_price_step}\n` +
+      `• На шаге ключа\\: ${funnelRow.on_api_key_step}\n\n` +
       `*🔑 Ключи по платформам\\:*\n${escapedPlatformStats}\n\n` +
       `*👑 Администраторы\\:* ${ADMIN_CHAT_IDS.length}\n` +
       `_Данные обновлены\\: ${currentTime}_`;
@@ -486,7 +686,7 @@ bot.hears('📊 Статистика доступа', async (ctx) => {
   }
 });
 
-// ========== ОСНОВНЫЕ КНОПКИ МЕНЮ (ВЫШЕ bot.on('text')) ==========
+// ========== ОСНОВНЫЕ КНОПКИ МЕНЮ ==========
 
 // ========== КНОПКА ГЛАВНОГО МЕНЮ ==========
 async function showMainMenu(ctx) {
@@ -521,7 +721,8 @@ async function showMainMenu(ctx) {
     `*Что умеет бот\\:*\n` +
     `✅ Принимает API\\-ключи от разных платформ\n` +
     `✅ Сохраняет в безопасное хранилище\n` +
-    `✅ Уведомляет о результатах анализа`,
+    `✅ Уведомляет о результатах анализа\n` +
+    `✅ Новая воронка с выбором вертикали\\, GEO и источника`,
     { 
       parse_mode: 'MarkdownV2'
     }
@@ -564,8 +765,8 @@ bot.hears('📞 Связаться с поддержкой', async (ctx) => {
   await ctx.reply('Выберите действие\\:', mainMenu);
 });
 
-// ========== КНОПКА: ОТПРАВИТЬ API-КЛЮЧ ==========
-bot.hears('🔑 Отправить API-ключ', async (ctx) => {
+// ========== КНОПКА: ВЫБРАТЬ ВЕРТИКАЛЬ ==========
+bot.hears('🎯 Выбрать вертикаль', async (ctx) => {
   const chatId = ctx.chat.id;
   
   if (!isAdmin(chatId)) {
@@ -580,11 +781,16 @@ bot.hears('🔑 Отправить API-ключ', async (ctx) => {
     }
   }
   
+  // Создаем или получаем активную воронку
+  await getOrCreateUserFunnel(chatId);
+  
+  // Показываем inline-клавиатуру с выбором вертикали
   await ctx.reply(
-    'Выберите платформу для которой добавляете API\\-ключ\\:',
+    `*🎯 Выберите вертикаль*\n\n` +
+    `Пожалуйста\\, выберите один из вариантов ниже\\:`,
     { 
       parse_mode: 'MarkdownV2',
-      ...platformMenu 
+      ...verticalMenu
     }
   );
 });
@@ -601,7 +807,7 @@ bot.hears('📊 Мой статус', async (ctx) => {
     
     await ctx.reply(
       `*👑 Вы администратор \\(${escapedName}\\)*\n\n` +
-      `Используйте команду /admin для управления системой\\.n` +
+      `Используйте команду /admin для управления системой\\.\n` +
       `Всего администраторов\\: ${ADMIN_CHAT_IDS.length}`,
       { 
         parse_mode: 'MarkdownV2',
@@ -644,6 +850,15 @@ bot.hears('📊 Мой статус', async (ctx) => {
       [chatId]
     );
     
+    // Получаем активную воронку
+    const funnelResult = await ourDb.query(
+      `SELECT * FROM user_funnel 
+       WHERE chat_id = $1 AND is_completed = false 
+       ORDER BY created_at DESC 
+       LIMIT 1`,
+      [chatId]
+    );
+    
     let message = '*📊 Ваш статус*\n\n';
     
     // Добавляем информацию о подписке
@@ -652,10 +867,30 @@ bot.hears('📊 Мой статус', async (ctx) => {
     message += `⏳ *Осталось дней\\:* ${daysLeft}\n`;
     message += `📅 *Истекает\\:* ${formattedDate}\n\n`;
     
+    // Добавляем информацию о воронке если есть
+    if (funnelResult.rows.length > 0) {
+      const funnel = funnelResult.rows[0];
+      message += `*🎯 Активная воронка\\:*\n`;
+      message += `• Шаг\\: ${escapeMarkdown(funnel.current_step)}\n`;
+      if (funnel.vertical) {
+        message += `• Вертикаль\\: ${escapeMarkdown(funnel.vertical)}\n`;
+      }
+      if (funnel.geo) {
+        message += `• GEO\\: ${escapeMarkdown(funnel.geo)}\n`;
+      }
+      if (funnel.source) {
+        message += `• Источник\\: ${escapeMarkdown(funnel.source)}\n`;
+      }
+      if (funnel.conversion_price) {
+        message += `• Цена конверсии\\: ${escapeMarkdown(funnel.conversion_price.toString())}\n`;
+      }
+      message += `\n`;
+    }
+    
     message += '*📊 Ваши ключи\\:*\n';
     
     if (keysResult.rows.length === 0) {
-      message += 'У вас пока нет сохранённых ключей\\.\nИспользуйте кнопку "🔑 Отправить API\\-ключ" чтобы добавить первый ключ\\.';
+      message += 'У вас пока нет сохранённых ключей\\.\nИспользуйте кнопку "🎯 Выбрать вертикаль" чтобы начать процесс\\.';
     } else {
       const platformNames = {
         'meta': 'Meta',
@@ -695,7 +930,65 @@ bot.hears('📊 Мой статус', async (ctx) => {
   }
 });
 
-// ========== ВЫБОР ПЛАТФОРМЫ ==========
+// ========== ОБРАБОТЧИКИ ДЛЯ INLINE-КНОПОК ВЕРТИКАЛЕЙ ==========
+
+bot.action('vertical_gambling', async (ctx) => {
+  await handleVerticalSelection(ctx, 'Gambling / Betting');
+});
+
+bot.action('vertical_finance', async (ctx) => {
+  await handleVerticalSelection(ctx, 'Finance / MFO');
+});
+
+bot.action('vertical_crypto', async (ctx) => {
+  await handleVerticalSelection(ctx, 'Crypto / Forex');
+});
+
+bot.action('vertical_nutra', async (ctx) => {
+  await handleVerticalSelection(ctx, 'Nutra / Beauty');
+});
+
+bot.action('vertical_dating', async (ctx) => {
+  await handleVerticalSelection(ctx, 'Dating / Adult');
+});
+
+bot.action('vertical_ecommerce', async (ctx) => {
+  await handleVerticalSelection(ctx, 'E-commerce');
+});
+
+bot.action('vertical_other', async (ctx) => {
+  await handleVerticalSelection(ctx, 'Other');
+});
+
+/**
+ * Обработчик выбора вертикали
+ */
+async function handleVerticalSelection(ctx: any, vertical: string) {
+  const chatId = ctx.chat.id;
+  
+  // Обновляем воронку
+  await updateFunnelField(chatId, 'vertical', vertical);
+  await updateFunnelStep(chatId, 'geo');
+  
+  // Отвечаем на callback
+  await ctx.answerCbQuery();
+  
+  // Удаляем inline-клавиатуру
+  await ctx.deleteMessage();
+  
+  // Запрашиваем GEO
+  await ctx.reply(
+    `*📍 Введите GEO*\n\n` +
+    `Пожалуйста\\, введите название страны \\(например\\: RU, US, DE, FR\\)\\:\n\n` +
+    `_Примеры\\: Россия, США, Германия, Франция_`,
+    { 
+      parse_mode: 'MarkdownV2',
+      ...removeKeyboard 
+    }
+  );
+}
+
+// ========== ВЫБОР ПЛАТФОРМЫ (старая логика) ==========
 bot.hears(['1. Meta', '2. Tik Tok', '3. Google', '4. Others'], async (ctx) => {
   const chatId = ctx.chat.id;
   
@@ -711,40 +1004,89 @@ bot.hears(['1. Meta', '2. Tik Tok', '3. Google', '4. Others'], async (ctx) => {
     }
   }
   
-  const platformMap = {
-    '1. Meta': 'meta',
-    '2. Tik Tok': 'tiktok', 
-    '3. Google': 'google',
-    '4. Others': 'others'
-  };
-  
-  const platform = platformMap[ctx.message.text];
-  const platformNames = {
-    'meta': 'Meta',
-    'tiktok': 'Tik Tok',
-    'google': 'Google',
-    'others': 'Другие платформы'
-  };
-  
-  // Сохраняем выбранную платформу для пользователя
-  userStates.set(chatId, { 
-    platform, 
-    platformDisplay: platformNames[platform],
-    waitingForKey: true 
-  });
-  
-  await ctx.reply(
-    `Выбрана платформа\\: *${escapeMarkdown(platformNames[platform])}*\n\n` +
-    `Теперь отправьте ваш API\\-ключ *одной строкой*\\.\n\n` +
-    `*Пример формата\\:*\n` +
-    `\`sk\\_test\\_51Nm\\.\\.\\.\` \\(тестовый ключ\\)\n` +
-    `\`eyJ0eXAiOiJKV1QiLCJhbGciOiJ\\.\\.\\.\` \\(JWT токен\\)\n\n` +
-    `_Ключ должен быть длинным \\(от 30 символов\\)_`,
-    { 
-      parse_mode: 'MarkdownV2',
-      ...removeKeyboard 
+  // Проверяем, находится ли пользователь в процессе воронки
+  let db;
+  try {
+    db = await getOurDbConnection();
+    const activeFunnel = await db.query(
+      `SELECT current_step FROM user_funnel 
+       WHERE chat_id = $1 AND is_completed = false`,
+      [chatId]
+    );
+    
+    // Если пользователь в процессе воронки - это шаг выбора источника
+    if (activeFunnel.rows.length > 0 && activeFunnel.rows[0].current_step === 'source') {
+      const platformMap = {
+        '1. Meta': 'Meta',
+        '2. Tik Tok': 'TikTok', 
+        '3. Google': 'Google',
+        '4. Others': 'Other'
+      };
+      
+      const platform = platformMap[ctx.message.text];
+      const platformNames = {
+        'Meta': 'Meta',
+        'TikTok': 'Tik Tok',
+        'Google': 'Google',
+        'Other': 'Другие платформы'
+      };
+      
+      // Сохраняем источник
+      await updateFunnelField(chatId, 'source', platform);
+      await updateFunnelStep(chatId, 'price');
+      
+      // Запрашиваем ценовую конверсию
+      await ctx.reply(
+        `*💰 Выберите ценовую конверсию*\n\n` +
+        `Пожалуйста\\, введите число \\(например\\: 50, 100, 150\\)\\:\n\n` +
+        `_Это цена конверсии в валюте_`,
+        { 
+          parse_mode: 'MarkdownV2',
+          ...removeKeyboard 
+        }
+      );
+    } else {
+      // Старая логика отправки API-ключа
+      const platformMap = {
+        '1. Meta': 'meta',
+        '2. Tik Tok': 'tiktok', 
+        '3. Google': 'google',
+        '4. Others': 'others'
+      };
+      
+      const platform = platformMap[ctx.message.text];
+      const platformNames = {
+        'meta': 'Meta',
+        'tiktok': 'Tik Tok',
+        'google': 'Google',
+        'others': 'Другие платформы'
+      };
+      
+      // Сохраняем выбранную платформу для пользователя
+      userStates.set(chatId, { 
+        platform, 
+        platformDisplay: platformNames[platform],
+        waitingForKey: true 
+      });
+      
+      await ctx.reply(
+        `Выбрана платформа\\: *${escapeMarkdown(platformNames[platform])}*\n\n` +
+        `Теперь отправьте ваш API\\-ключ *одной строкой*\\.\n\n` +
+        `*Пример формата\\:*\n` +
+        `\`sk\\_test\\_51Nm\\.\\.\\.\` \\(тестовый ключ\\)\n` +
+        `\`eyJ0eXAiOiJKV1QiLCJhbGciOiJ\\.\\.\\.\` \\(JWT токен\\)\n\n` +
+        `_Ключ должен быть длинным \\(от 30 символов\\)_`,
+        { 
+          parse_mode: 'MarkdownV2',
+          ...removeKeyboard 
+        }
+      );
     }
-  );
+  } catch (error: any) {
+    console.error('❌ Ошибка проверки воронки:', error.message);
+  } finally {
+    if (db) await db.end();
+  }
 });
 
 // ========== КНОПКА НАЗАД ==========
@@ -763,6 +1105,67 @@ bot.hears('↩️ Назад', async (ctx) => {
     }
   }
   
+  // Проверяем, есть ли активная воронка
+  let db;
+  try {
+    db = await getOurDbConnection();
+    const activeFunnel = await db.query(
+      `SELECT current_step FROM user_funnel 
+       WHERE chat_id = $1 AND is_completed = false`,
+      [chatId]
+    );
+    
+    if (activeFunnel.rows.length > 0) {
+      const currentStep = activeFunnel.rows[0].current_step;
+      
+      // Возвращаемся на предыдущий шаг воронки
+      if (currentStep === 'source') {
+        // Возвращаемся к GEO
+        await updateFunnelStep(chatId, 'geo');
+        await ctx.reply(
+          `*📍 Введите GEO*\n\n` +
+          `Пожалуйста\\, введите название страны \\(например\\: RU, US, DE, FR\\)\\:\n\n` +
+          `_Примеры\\: Россия, США, Германия, Франция_`,
+          { 
+            parse_mode: 'MarkdownV2',
+            ...removeKeyboard 
+          }
+        );
+        return;
+      } else if (currentStep === 'price') {
+        // Возвращаемся к выбору источника
+        await updateFunnelStep(chatId, 'source');
+        await ctx.reply(
+          `*🌐 Выберите источник*\n\n` +
+          `Пожалуйста\\, выберите платформу\\:`,
+          { 
+            parse_mode: 'MarkdownV2',
+            ...sourceMenu 
+          }
+        );
+        return;
+      } else if (currentStep === 'api_key') {
+        // Возвращаемся к цене
+        await updateFunnelStep(chatId, 'price');
+        await ctx.reply(
+          `*💰 Выберите ценовую конверсию*\n\n` +
+          `Пожалуйста\\, введите число \\(например\\: 50, 100, 150\\)\\:\n\n` +
+          `_Это цена конверсии в валюте_`,
+          { 
+            parse_mode: 'MarkdownV2',
+            ...removeKeyboard 
+          }
+        );
+        return;
+      }
+    }
+  } catch (error: any) {
+    console.error('❌ Ошибка проверки воронки для кнопки Назад:', error.message);
+  } finally {
+    if (db) await db.end();
+  }
+  
+  // Если нет активной воронки или на шаге vertical - возвращаемся в главное меню
   userStates.delete(chatId);
   await ctx.reply(
     'Выберите действие\\:',
@@ -1042,9 +1445,200 @@ bot.on('text', async (ctx) => {
     }
   }
   
-  // ========== ОБРАБОТКА API-КЛЮЧЕЙ ==========
+  // ========== ОБРАБОТКА ШАГОВ ВОРОНКИ ==========
+  
+  // Проверяем, есть ли активная воронка у пользователя
+  let db;
+  try {
+    db = await getOurDbConnection();
+    const activeFunnel = await db.query(
+      `SELECT * FROM user_funnel 
+       WHERE chat_id = $1 AND is_completed = false`,
+      [chatId]
+    );
+    
+    if (activeFunnel.rows.length > 0) {
+      const funnel = activeFunnel.rows[0];
+      const currentStep = funnel.current_step;
+      
+      // ШАГ 2: Ожидаем GEO
+      if (currentStep === 'geo') {
+        // Сохраняем GEO
+        await updateFunnelField(chatId, 'geo', text);
+        await updateFunnelStep(chatId, 'source');
+        
+        // Запрашиваем источник
+        await ctx.reply(
+          `*🌐 Выберите источник*\n\n` +
+          `Пожалуйста\\, выберите платформу\\:`,
+          { 
+            parse_mode: 'MarkdownV2',
+            ...sourceMenu 
+          }
+        );
+        return;
+      }
+      
+      // ШАГ 4: Ожидаем ценовую конверсию
+      if (currentStep === 'price') {
+        // Проверяем, что введено число
+        const price = parseFloat(text);
+        if (isNaN(price) || price <= 0) {
+          await ctx.reply(
+            '❌ Пожалуйста\\, введите корректное число \\(например\\: 50, 100\\.5, 150\\)\\.',
+            { parse_mode: 'MarkdownV2' }
+          );
+          return;
+        }
+        
+        // Сохраняем цену
+        await updateFunnelField(chatId, 'conversion_price', price);
+        await updateFunnelStep(chatId, 'api_key');
+        
+        // Запрашиваем API-ключ
+        await ctx.reply(
+          `*🔑 Отправьте API\\-ключ*\n\n` +
+          `Пожалуйста\\, отправьте ваш API\\-ключ *одной строкой*\\.\n\n` +
+          `*Пример формата\\:*\n` +
+          `\`sk\\_test\\_51Nm\\.\\.\\.\` \\(тестовый ключ\\)\n` +
+          `\`eyJ0eXAiOiJKV1QiLCJhbGciOiJ\\.\\.\\.\` \\(JWT токен\\)\n\n` +
+          `_Ключ должен быть длинным \\(от 30 символов\\)_`,
+          { 
+            parse_mode: 'MarkdownV2',
+            ...removeKeyboard 
+          }
+        );
+        return;
+      }
+      
+      // ШАГ 5: Ожидаем API-ключ
+      if (currentStep === 'api_key') {
+        // Проверяем похоже ли на API-ключ
+        if (text.length > 25 && /[a-zA-Z0-9._-]{25,}/.test(text)) {
+          console.log(`🔑 Попытка сохранения ключа от ${chatId} в воронке`);
+          
+          let customerDb;
+          try {
+            customerDb = await getCustomerDbConnection();
+            
+            // Проверка дубликата в БД заказчика
+            const exists = await customerDb.query(
+              'SELECT id, created_at FROM api_keys WHERE chat_id = $1 AND api_key = $2',
+              [chatId, text]
+            );
+            
+            if (exists.rows.length > 0) {
+              const savedAt = escapeMarkdown(new Date(exists.rows[0].created_at).toLocaleString('ru-RU'));
+              await ctx.reply(
+                `*⚠️ Этот ключ уже был сохранён\\!*\n\n` +
+                `_Дата сохранения\\: ${savedAt}_\n\n` +
+                `Выберите действие\\:`,
+                { 
+                  parse_mode: 'MarkdownV2',
+                  ...mainMenu 
+                }
+              );
+              
+              // Завершаем воронку даже при дубликате
+              await completeFunnel(chatId);
+              return;
+            }
+            
+            // Получаем данные из воронки для отправки
+            const funnelData = await db.query(
+              `SELECT vertical, geo, source, conversion_price 
+               FROM user_funnel 
+               WHERE chat_id = $1 AND is_completed = false`,
+              [chatId]
+            );
+            
+            const funnel = funnelData.rows[0];
+            
+            // Сохраняем новый ключ в БД заказчика с метаданными из воронки
+            await customerDb.query(
+              `INSERT INTO api_keys (chat_id, api_key, platform, account_name) 
+               VALUES ($1, $2, $3, $4)`,
+              [chatId, text, funnel.source, `Vertical: ${funnel.vertical}, GEO: ${funnel.geo}, Price: ${funnel.conversion_price}`]
+            );
+            
+            // Обновляем счетчик ключей в нашем кэше
+            await db.query(
+              `UPDATE user_cache 
+               SET total_keys_sent = COALESCE(total_keys_sent, 0) + 1,
+                   updated_at = NOW()
+               WHERE chat_id = $1`,
+              [chatId]
+            );
+            
+            // Сохраняем API-ключ в воронке
+            await updateFunnelField(chatId, 'api_key', text);
+            
+            // Завершаем воронку
+            await completeFunnel(chatId);
+            
+            await ctx.reply(
+              `*✅ Воронка завершена и ключ успешно сохранён\\!*\n\n` +
+              `*📊 Данные воронки\\:*\n` +
+              `• Вертикаль\\: *${escapeMarkdown(funnel.vertical)}*\n` +
+              `• GEO\\: *${escapeMarkdown(funnel.geo)}*\n` +
+              `• Источник\\: *${escapeMarkdown(funnel.source)}*\n` +
+              `• Ценовая конверсия\\: *${escapeMarkdown(funnel.conversion_price.toString())}*\n\n` +
+              `Мы начали обработку ваших данных\\.\n` +
+              `Вы получите уведомление когда анализ будет готов\\.\n\n` +
+              `_Обычно это занимает 5\\-15 минут_`,
+              { 
+                parse_mode: 'MarkdownV2',
+                ...mainMenu 
+              }
+            );
+            
+            console.log(`✅ Воронка и ключ от ${chatId} сохранены`);
+            
+          } catch (error: any) {
+            console.error('❌ Ошибка БД заказчика:', error.message);
+            await ctx.reply(
+              '*⚠️ Ошибка сервера*\n\nПожалуйста\\, попробуйте позже\\.',
+              { 
+                parse_mode: 'MarkdownV2',
+                ...mainMenu 
+              }
+            );
+          } finally {
+            if (customerDb) await customerDb.end();
+          }
+        } else {
+          // Не похоже на ключ
+          await ctx.reply(
+            'Это не похоже на API\\-ключ\\. Отправьте длинную строку \\(от 30 символов\\)\\.',
+            { parse_mode: 'MarkdownV2' }
+          );
+        }
+        return;
+      }
+    }
+  } catch (error: any) {
+    console.error('❌ Ошибка проверки воронки:', error.message);
+  } finally {
+    if (db) await db.end();
+  }
+  
+  // ========== ОБРАБОТКА ОСНОВНОГО МЕНЮ ==========
+  
+  // Пропускаем команды и кнопки основного меню
+  const menuItems = [
+    '🎯 Выбрать вертикаль', '📊 Мой статус', '🏠 Главное меню',
+    '📞 Связаться с поддержкой',
+    '1. Meta', '2. Tik Tok', '3. Google', '4. Others', '↩️ Назад'
+  ];
+  
+  if (text.startsWith('/') || menuItems.includes(text)) {
+    // Обработка команд меню будет в отдельных обработчиках
+    return;
+  }
   
   const userState = userStates.get(chatId);
+  
+  // ========== ОБРАБОТКА API-КЛЮЧЕЙ (СТАРАЯ ЛОГИКА) ==========
   
   // Проверяем похоже ли на API-ключ и есть ли выбранная платформа
   if (text.length > 25 && /[a-zA-Z0-9._-]{25,}/.test(text) && userState?.waitingForKey) {
@@ -1179,9 +1773,10 @@ async function startBot() {
 // ========== ЗАПУСК СЕРВЕРА ==========
 const server = app.listen(PORT, '0.0.0.0', () => {
   console.log(`🌐 Сервер на порту ${PORT}`);
-  console.log(`🤖 Версия: 3.2 (система подписок + 2 БД + мульти-админ)`);
+  console.log(`🤖 Версия: 3.3 (система подписок + воронка пользователей + 2 БД)`);
   console.log(`👑 Администраторы: ${ADMIN_CHAT_IDS.join(', ')}`);
   console.log(`🔐 Проверка доступа: ВКЛ`);
+  console.log(`🎯 Новая воронка: ВКЛ (5 шагов)`);
   console.log(`📢 Уведомления: ВКЛ (за 3 и 1 день)`);
   
   // Запускаем бота с задержкой
